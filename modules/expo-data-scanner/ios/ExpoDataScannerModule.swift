@@ -5,16 +5,17 @@ public class ExpoDataScannerModule: Module {
   public func definition() -> ModuleDefinition {
     Name("ExpoDataScanner")
 
-    // DataScannerViewController is @MainActor-isolated, so this Function must
-    // run on the main queue, not the default JS thread.
-    Function("isSupported") { () -> Bool in
+    // DataScannerViewController is @MainActor-isolated. AsyncFunction returns
+    // a Promise on the JS side and lets us hop to the main actor explicitly.
+    AsyncFunction("isSupported") { () -> Bool in
       if #available(iOS 16.0, *) {
-        return DataScannerViewController.isSupported
-            && DataScannerViewController.isAvailable
+        return await MainActor.run {
+          DataScannerViewController.isSupported
+              && DataScannerViewController.isAvailable
+        }
       }
       return false
     }
-    .runOnQueue(.main)
 
     View(ExpoDataScannerView.self) {
       Events("onScan")

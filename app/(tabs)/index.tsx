@@ -26,12 +26,13 @@ export default function SmokeTestScreen() {
   const [fetchState, setFetchState] = React.useState<FetchState>({ status: 'idle' });
   const [scanned, setScanned] = React.useState<string | null>(null);
 
-  const scannerSupported = React.useMemo(() => {
-    try {
-      return ExpoDataScanner.isSupported();
-    } catch {
-      return false;
-    }
+  const [scannerSupported, setScannerSupported] = React.useState(false);
+  React.useEffect(() => {
+    let cancelled = false;
+    ExpoDataScanner.isSupported()
+      .then((v) => { if (!cancelled) setScannerSupported(v); })
+      .catch(() => { if (!cancelled) setScannerSupported(false); });
+    return () => { cancelled = true; };
   }, []);
 
   const liquidGlass = isLiquidGlassAvailable();
