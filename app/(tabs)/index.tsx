@@ -3,10 +3,12 @@ import {
   ActivityIndicator,
   Alert,
   FlatList,
+  Modal,
   Pressable,
   RefreshControl,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -38,6 +40,8 @@ export default function DashboardScreen() {
   const setCheckinMessage = useAppState(s => s.setCheckinMessage);
 
   const [refreshing, setRefreshing] = React.useState(false);
+  const [numberDialogRollcallID, setNumberDialogRollcallID] = React.useState<number | null>(null);
+  const [numberCode, setNumberCode] = React.useState('');
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -48,16 +52,33 @@ export default function DashboardScreen() {
     router.push({ pathname: '/scanner', params: { mode: 'global' } });
   };
 
+  const openNumberDialog = (rollcallID: number) => {
+    setNumberCode('');
+    setNumberDialogRollcallID(rollcallID);
+  };
+
+  const closeNumberDialog = () => {
+    setNumberDialogRollcallID(null);
+    setNumberCode('');
+  };
+
+  const submitNumberDialog = () => {
+    const value = numberCode.trim();
+    if (!value) {
+      Alert.alert('内容为空', '请输入数字签到码');
+      return;
+    }
+    const rollcallID = numberDialogRollcallID;
+    closeNumberDialog();
+    if (rollcallID) void checkinNumber(rollcallID, value);
+  };
+
   const onTapRollcall = (r: Rollcall) => {
     if (!isAbsent(r)) return;
     if (r.source === 'qr') {
       router.push({ pathname: '/scanner', params: { mode: 'rollcall', rollcallID: String(r.rollcall_id) } });
     } else if (r.source === 'number') {
-      // Use Alert.prompt on iOS, fallback to a simple Alert + manual entry elsewhere.
-      // We use a lightweight cross-platform dialog via Alert.
-      promptForNumber((value) => {
-        if (value) checkinNumber(r.rollcall_id, value);
-      });
+      openNumberDialog(r.rollcall_id);
     } else if (r.source === 'radar') {
       const inst = todayCourses.find(c => {
         if (c.startMs == null || c.endMs == null) return false;
@@ -133,6 +154,44 @@ export default function DashboardScreen() {
           <GlassToast message={checkinMessage} />
         </View>
       )}
+
+      <Modal
+        animationType="fade"
+        transparent
+        visible={numberDialogRollcallID !== null}
+        onRequestClose={closeNumberDialog}
+      >
+        <View style={styles.modalBackdrop}>
+          <GlassCard borderRadius={18} style={styles.numberCard}>
+            <Text style={styles.numberTitle}>输入签到码</Text>
+            <Text style={styles.numberHint}>请输入老师提供的数字签到码</Text>
+            <TextInput
+              autoFocus
+              keyboardType="number-pad"
+              maxLength={8}
+              onChangeText={setNumberCode}
+              placeholder="4 位数字"
+              placeholderTextColor="rgba(235,235,245,0.35)"
+              style={styles.numberInput}
+              value={numberCode}
+            />
+            <View style={styles.actionRow}>
+              <Pressable
+                onPress={closeNumberDialog}
+                style={[styles.actionButton, styles.actionButtonSecondary]}
+              >
+                <Text style={styles.actionButtonText}>取消</Text>
+              </Pressable>
+              <Pressable
+                onPress={submitNumberDialog}
+                style={[styles.actionButton, styles.actionButtonPrimary]}
+              >
+                <Text style={styles.actionButtonText}>确定</Text>
+              </Pressable>
+            </View>
+          </GlassCard>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -168,34 +227,6 @@ function RollcallRow({ rollcall, onPress }: { rollcall: Rollcall; onPress: () =>
       </View>
     </GlassCard>
   );
-}
-
-// -------- helpers --------
-
-function promptForNumber(cb: (value: string | null) => void) {
-  // Alert.prompt is iOS only. On other platforms we approximate.
-  const RNAlert = require('react-native').Alert as typeof import('react-native').Alert;
-  if (typeof (RNAlert as any).prompt === 'function') {
-    (RNAlert as any).prompt(
-      '输入签到码',
-      '4 位数字',
-      [
-        { text: '取消', onPress: () => cb(null), style: 'cancel' },
-        { text: '确定', onPress: (v: string) => cb(v) },
-      ],
-      'plain-text',
-      '',
-      'number-pad',
-    );
-  } else {
-    // Web/Android fallback: use browser prompt or a simple alert flow
-    if (typeof window !== 'undefined' && typeof window.prompt === 'function') {
-      const v = window.prompt('输入签到码 (4 位数字)');
-      cb(v);
-    } else {
-      Alert.alert('暂不支持', '当前平台不支持数字输入弹窗');
-    }
-  }
 }
 
 function timeAgo(ms: number): string {
@@ -267,4 +298,36 @@ const styles = StyleSheet.create({
     right: 0,
     alignItems: 'center',
   },
+
+  modalBackdrop: {
+    flex: 1,
+    justifyContent: 'center',
+    paddingHorizontal: 22,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  numberCard: { padding: 18 },
+  numberTitle: { color: '#fff', fontSize: 17, fontWeight: '700' },
+  numberHint: { color: 'rgba(235,235,245,0.6)', fontSize: 13, marginTop: 6 },
+  numberInput: {
+    marginTop: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 12,
+    color: '#fff',
+    backgroundColor: 'rgba(120,120,128,0.26)',
+    fontSize: 22,
+    fontWeight: '700',
+    letterSpacing: 4,
+    textAlign: 'center',
+  },
+  actionRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
+  actionButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 12,
+    alignItems: 'center',
+  },
+  actionButtonSecondary: { backgroundColor: 'rgba(120,120,128,0.4)' },
+  actionButtonPrimary: { backgroundColor: '#3478f6' },
+  actionButtonText: { color: '#fff', fontSize: 15, fontWeight: '600' },
 });
