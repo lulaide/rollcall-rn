@@ -43,6 +43,16 @@ const MAPPING: IconMapping = {
   // Network
   'wifi': 'wifi',
   'wifi.slash': 'wifi-off',
+
+  // Accounts / multi-account
+  'person.2.fill': 'group',
+  'person.crop.circle.badge.plus': 'person-add',
+  'dot.radiowaves.left.and.right': 'sensors',
+  'ellipsis.circle': 'more-horiz',
+  'doc.on.doc': 'content-copy',
+  'square.and.arrow.down': 'download',
+  'trash': 'delete',
+  'plus': 'add',
 };
 
 export function IconSymbol({

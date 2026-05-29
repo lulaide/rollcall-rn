@@ -1,22 +1,38 @@
 import * as React from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
 
-import { GlassCard } from '@/src/components/Glass';
+import { GlassCard, liquidGlassAvailable } from '@/src/components/Glass';
 import { IconSymbol } from '@/components/ui/icon-symbol';
-import { liquidGlassAvailable } from '@/src/components/Glass';
 import { useAppState } from '@/src/store/appState';
 import { useConfig } from '@/src/store/config';
 
 export default function SettingsScreen() {
-  const cfg = useConfig();
-  const logout = useAppState(s => s.logout);
-  const centerConnected = useAppState(s => s.centerConnected);
+  const router = useRouter();
+  const accounts = useConfig(s => s.accounts);
+  const autoLocationCheckin = useConfig(s => s.autoLocationCheckin);
+  const autoNumberCheckin = useConfig(s => s.autoNumberCheckin);
+  const curriculumPreMinutes = useConfig(s => s.curriculumPreMinutes);
+  const requestTimeoutMs = useConfig(s => s.requestTimeoutMs);
+  const setGlobal = useConfig(s => s.setGlobal);
+  const clearAll = useConfig(s => s.clearAll);
 
-  const confirmLogout = () => {
-    Alert.alert('确定退出登录？', '这会清空你的密码缓存和会话 Cookie。', [
+  const logoutAccount = useAppState(s => s.logoutAccount);
+
+  const enabledCount = accounts.filter(a => a.enabled).length;
+
+  const onClearAll = () => {
+    Alert.alert('清除全部数据', '将删除所有账号及其会话、签到数据，且不可恢复。', [
       { text: '取消', style: 'cancel' },
-      { text: '退出', style: 'destructive', onPress: logout },
+      {
+        text: '全部清除',
+        style: 'destructive',
+        onPress: () => {
+          for (const a of accounts) logoutAccount(a.id);
+          clearAll();
+        },
+      },
     ]);
   };
 
@@ -27,13 +43,14 @@ export default function SettingsScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <SectionLabel>账号信息</SectionLabel>
+        <SectionLabel>账号</SectionLabel>
         <GlassCard borderRadius={14} style={{ padding: 0 }}>
-          <Row label="账号" value={cfg.username || '(未设置)'} />
-          <Divider />
-          <Row label="学号" value={cfg.studentID || '(未设置)'} />
-          <Divider />
-          <Row label="Client ID" value={cfg.clientID.slice(0, 8) + '...'} />
+          <Pressable onPress={() => router.push('/(tabs)/accounts')} style={styles.rowItem}>
+            <Text style={styles.label}>账号管理</Text>
+            <View style={{ flex: 1 }} />
+            <Text style={styles.value}>已启用 {enabledCount}/{accounts.length}</Text>
+            <IconSymbol name="chevron.right" size={16} color="rgba(235,235,245,0.4)" />
+          </Pressable>
         </GlassCard>
 
         <SectionLabel>签到设置</SectionLabel>
@@ -42,43 +59,40 @@ export default function SettingsScreen() {
             label="自动定位签到"
             right={
               <Switch
-                value={cfg.autoLocationCheckin}
-                onValueChange={v => cfg.set({ autoLocationCheckin: v })}
+                value={autoLocationCheckin}
+                onValueChange={v => setGlobal({ autoLocationCheckin: v })}
               />
             }
           />
           <Divider />
           <Row
-            label="暂停接收共享签到"
+            label="自动数字签到"
             right={
               <Switch
-                value={cfg.pauseSharedRollcall}
-                onValueChange={v => cfg.set({ pauseSharedRollcall: v })}
+                value={autoNumberCheckin}
+                onValueChange={v => setGlobal({ autoNumberCheckin: v })}
               />
             }
           />
           <Divider />
           <Stepper
             label="课前轮询"
-            value={cfg.curriculumPreMinutes}
+            value={curriculumPreMinutes}
             min={1}
             max={30}
+            step={1}
             unit="分钟"
-            onChange={v => cfg.set({ curriculumPreMinutes: v })}
+            onChange={v => setGlobal({ curriculumPreMinutes: v })}
           />
-        </GlassCard>
-
-        <SectionLabel>服务器</SectionLabel>
-        <GlassCard borderRadius={14} style={{ padding: 0 }}>
-          <Row label="Center" value={cfg.centerServerURL} valueMono />
           <Divider />
-          <Row
-            label="状态"
-            right={
-              <Text style={[styles.value, { color: centerConnected ? '#34d399' : '#ff453a' }]}>
-                {centerConnected ? '已连接' : '未连接'}
-              </Text>
-            }
+          <Stepper
+            label="请求超时"
+            value={requestTimeoutMs / 1000}
+            min={5}
+            max={15}
+            step={1}
+            unit="秒"
+            onChange={v => setGlobal({ requestTimeoutMs: v * 1000 })}
           />
         </GlassCard>
 
@@ -88,11 +102,11 @@ export default function SettingsScreen() {
         </GlassCard>
 
         <Pressable
-          onPress={confirmLogout}
-          style={({ pressed }) => [styles.logoutButton, pressed && { opacity: 0.85 }]}
+          onPress={onClearAll}
+          style={({ pressed }) => [styles.dangerButton, pressed && { opacity: 0.85 }]}
         >
-          <IconSymbol name="rectangle.portrait.and.arrow.right" size={18} color="#ff453a" />
-          <Text style={styles.logoutText}>退出登录</Text>
+          <IconSymbol name="trash" size={18} color="#ff453a" />
+          <Text style={styles.dangerText}>清除全部数据</Text>
         </Pressable>
 
         <View style={{ height: 80 }} />
@@ -105,29 +119,12 @@ function SectionLabel({ children }: { children: React.ReactNode }) {
   return <Text style={styles.sectionLabel}>{children}</Text>;
 }
 
-function Row({
-  label,
-  value,
-  right,
-  valueMono,
-}: {
-  label: string;
-  value?: string;
-  right?: React.ReactNode;
-  valueMono?: boolean;
-}) {
+function Row({ label, value, right }: { label: string; value?: string; right?: React.ReactNode }) {
   return (
     <View style={styles.rowItem}>
       <Text style={styles.label}>{label}</Text>
       <View style={{ flex: 1 }} />
-      {right ?? (
-        <Text
-          style={[styles.value, valueMono && { fontFamily: 'Menlo', fontSize: 12 }]}
-          numberOfLines={1}
-        >
-          {value}
-        </Text>
-      )}
+      {right ?? <Text style={styles.value} numberOfLines={1}>{value}</Text>}
     </View>
   );
 }
@@ -137,9 +134,9 @@ function Divider() {
 }
 
 function Stepper({
-  label, value, min, max, unit, onChange,
+  label, value, min, max, step, unit, onChange,
 }: {
-  label: string; value: number; min: number; max: number; unit: string;
+  label: string; value: number; min: number; max: number; step: number; unit: string;
   onChange: (v: number) => void;
 }) {
   return (
@@ -148,17 +145,11 @@ function Stepper({
       <View style={{ flex: 1 }} />
       <Text style={styles.value}>{value} {unit}</Text>
       <View style={styles.stepperBox}>
-        <Pressable
-          onPress={() => onChange(Math.max(min, value - 1))}
-          style={styles.stepperBtn}
-        >
+        <Pressable onPress={() => onChange(Math.max(min, value - step))} style={styles.stepperBtn}>
           <Text style={styles.stepperText}>−</Text>
         </Pressable>
         <View style={styles.stepperDivider} />
-        <Pressable
-          onPress={() => onChange(Math.min(max, value + 1))}
-          style={styles.stepperBtn}
-        >
+        <Pressable onPress={() => onChange(Math.min(max, value + step))} style={styles.stepperBtn}>
           <Text style={styles.stepperText}>+</Text>
         </Pressable>
       </View>
@@ -168,11 +159,7 @@ function Stepper({
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#0b0b0e' },
-  headerRow: {
-    paddingHorizontal: 20,
-    paddingTop: 8,
-    paddingBottom: 12,
-  },
+  headerRow: { paddingHorizontal: 20, paddingTop: 8, paddingBottom: 12 },
   title: { color: '#fff', fontSize: 32, fontWeight: '700' },
   content: { paddingHorizontal: 20, gap: 6 },
 
@@ -213,7 +200,7 @@ const styles = StyleSheet.create({
   stepperText: { color: '#fff', fontSize: 18, fontWeight: '500' },
   stepperDivider: { width: StyleSheet.hairlineWidth, backgroundColor: 'rgba(255,255,255,0.2)' },
 
-  logoutButton: {
+  dangerButton: {
     marginTop: 24,
     flexDirection: 'row',
     alignItems: 'center',
@@ -223,5 +210,5 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,69,58,0.15)',
     borderRadius: 14,
   },
-  logoutText: { color: '#ff453a', fontSize: 16, fontWeight: '600' },
+  dangerText: { color: '#ff453a', fontSize: 16, fontWeight: '600' },
 });

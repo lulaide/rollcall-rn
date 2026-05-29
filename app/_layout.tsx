@@ -6,20 +6,20 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 import { useAppState } from '@/src/store/appState';
-import { useConfig, isConfigured } from '@/src/store/config';
+import { useConfig, hasAnyAccount } from '@/src/store/config';
 
 export default function RootLayout() {
-  const isLoggedIn = useAppState(s => s.isLoggedIn);
-  const checkSession = useAppState(s => s.checkSession);
-  const cfg = useConfig();
+  const hasAccount = useConfig(hasAnyAccount);
+  const loginAllEnabled = useAppState(s => s.loginAllEnabled);
+  const startServices = useAppState(s => s.startServices);
 
-  // On first boot: if user has saved credentials, try silent session check.
+  // On first boot: log in every enabled account, then start the poller.
   const bootstrappedRef = React.useRef(false);
   React.useEffect(() => {
     if (bootstrappedRef.current) return;
     bootstrappedRef.current = true;
-    if (isConfigured(cfg)) {
-      void checkSession();
+    if (hasAccount) {
+      void loginAllEnabled().finally(() => startServices());
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -33,7 +33,7 @@ export default function RootLayout() {
             contentStyle: { backgroundColor: '#0b0b0e' },
           }}
         >
-          <Stack.Protected guard={isLoggedIn}>
+          <Stack.Protected guard={hasAccount}>
             <Stack.Screen name="(tabs)" />
             <Stack.Screen
               name="scanner"
@@ -42,9 +42,16 @@ export default function RootLayout() {
                 animation: 'slide_from_bottom',
               }}
             />
+            <Stack.Screen
+              name="account-edit"
+              options={{
+                presentation: 'modal',
+                animation: 'slide_from_bottom',
+              }}
+            />
           </Stack.Protected>
 
-          <Stack.Protected guard={!isLoggedIn}>
+          <Stack.Protected guard={!hasAccount}>
             <Stack.Screen name="login" />
           </Stack.Protected>
         </Stack>

@@ -3,7 +3,7 @@ import * as React from 'react';
 import { Alert, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useRouter } from 'expo-router';
 
 import { GlassCard } from '@/src/components/Glass';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -12,16 +12,10 @@ import ExpoDataScanner, {
 } from '@/modules/expo-data-scanner';
 import { useAppState } from '@/src/store/appState';
 
-type ScanMode = 'global' | 'rollcall';
-
 export default function ScannerScreen() {
   const router = useRouter();
-  const params = useLocalSearchParams<{ mode?: ScanMode; rollcallID?: string }>();
-  const mode: ScanMode = params.mode === 'rollcall' ? 'rollcall' : 'global';
-  const rollcallID = params.rollcallID ? parseInt(params.rollcallID, 10) : undefined;
 
-  const submitGlobalQR = useAppState(s => s.submitGlobalQR);
-  const checkinQR = useAppState(s => s.checkinQR);
+  const batchCheckinQR = useAppState(s => s.batchCheckinQR);
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [scannerSupported, setScannerSupported] = React.useState(Platform.OS === 'android');
@@ -55,11 +49,7 @@ export default function ScannerScreen() {
   };
 
   const submit = async (raw: string) => {
-    if (mode === 'global') {
-      await submitGlobalQR(raw);
-    } else if (rollcallID) {
-      await checkinQR(rollcallID, raw);
-    }
+    await batchCheckinQR(raw);
     router.back();
   };
 
@@ -137,9 +127,7 @@ export default function ScannerScreen() {
             <Pressable onPress={() => router.back()} hitSlop={8}>
               <Text style={styles.topBtn}>取消</Text>
             </Pressable>
-            <Text style={styles.topTitle}>
-              {mode === 'global' ? '扫一扫签到' : '扫码签到'}
-            </Text>
+            <Text style={styles.topTitle}>扫码签到</Text>
             <Pressable onPress={promptManual} hitSlop={8}>
               <Text style={[styles.topBtn, { color: '#3478f6' }]}>手动输入</Text>
             </Pressable>

@@ -1,6 +1,6 @@
-# CQUPT Rollcall · React Native
+# 云小北 · React Native
 
-重庆邮电大学自动签到客户端的 React Native 跨平台重构（iOS / Android / Web）。
+多账号自动签到客户端的 React Native 跨平台实现（iOS / Android / Web）。
 原 SwiftUI 项目：[lulaide/rollcall-ios](https://github.com/lulaide/rollcall-ios)。
 
 ## 技术选型
@@ -21,11 +21,11 @@
    https://github.com/lulaide/rollcall-rn/releases/latest/download/source.json
    ```
 
-2. 从源里安装"CQUPT签到"。
+2. 从源里安装"云小北"。
 
 ### Android
 
-从 [Releases](https://github.com/lulaide/rollcall-rn/releases) 下载 `CQUPTRollcall.apk`，允许"未知来源"安装。
+从 [Releases](https://github.com/lulaide/rollcall-rn/releases) 下载 `Yunxiaobei.apk`，允许"未知来源"安装。
 
 ### Web
 

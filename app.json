@@ -1,18 +1,18 @@
 {
   "expo": {
-    "name": "CQUPTRollcall",
-    "slug": "rollcall-rn",
+    "name": "云小北",
+    "slug": "yunxiaobei",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
-    "scheme": "rollcallrn",
+    "scheme": "yunxiaobei",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.cqupt.rollcall.CQUPTRollcall",
+      "bundleIdentifier": "com.yunxiaobei.app",
       "infoPlist": {
-        "CFBundleDisplayName": "CQUPT签到",
+        "CFBundleDisplayName": "云小北",
         "NSCameraUsageDescription": "需要使用相机扫描签到二维码",
         "NSAppTransportSecurity": {
           "NSExceptionDomains": {
@@ -30,9 +30,9 @@
       }
     },
     "android": {
-      "package": "com.cqupt.rollcall",
+      "package": "com.yunxiaobei.app",
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
+        "backgroundColor": "#FFD9E1",
         "foregroundImage": "./assets/images/android-icon-foreground.png",
         "backgroundImage": "./assets/images/android-icon-background.png",
         "monochromeImage": "./assets/images/android-icon-monochrome.png"

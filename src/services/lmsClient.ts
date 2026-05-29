@@ -17,6 +17,14 @@ const LMS_BASE = 'http://lms.tc.cqupt.edu.cn';
 const IDS_BASE = 'https://ids.cqupt.edu.cn';
 const UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 
+export interface StudentRollcallsDetail {
+  isNumber: boolean;
+  /** Live number sign-in code, '' when none. May be '0' meaning "not active yet". */
+  numberCode: string;
+  /** How many students in the roster already signed (status === 'on_call'). */
+  checkedInCount: number;
+}
+
 export class LMSError extends Error {
   constructor(message: string, public kind: 'login' | 'session' | 'checkin' | 'network') {
     super(message);
@@ -112,12 +120,51 @@ export class LMSClient {
     return json.rollcalls ?? [];
   }
 
+  /**
+   * Fetch a single rollcall's student-side detail to obtain the live number
+   * sign-in code. Mirrors the Go edge client's GetStudentRollcalls.
+   *   GET /api/rollcall/{id}/student_rollcalls
+   * `number_code` may come back as a string OR an int, so it is coerced to a
+   * trimmed string (a previous Go build crashed assuming int).
+   */
+  async getStudentRollcalls(
+    rollcallID: number,
+    reLoginIfNeeded: () => Promise<void>,
+  ): Promise<StudentRollcallsDetail | null> {
+    const url = `${LMS_BASE}/api/rollcall/${rollcallID}/student_rollcalls`;
+    let res = await this.rawFetch(url);
+    if (res.status === 302 || res.status === 401) {
+      await reLoginIfNeeded();
+      res = await this.rawFetch(url);
+      if (res.status !== 200) return null;
+    }
+    if (res.status !== 200) {
+      throw new LMSError(`getStudentRollcalls HTTP ${res.status}`, 'network');
+    }
+
+    let raw: unknown = null;
+    try { raw = await res.json(); } catch { return null; }
+
+    const obj = (raw ?? {}) as Record<string, unknown>;
+    const roster = Array.isArray(obj.student_rollcalls)
+      ? (obj.student_rollcalls as { status?: string }[])
+      : [];
+    const checkedInCount = roster.filter(r => r?.status === 'on_call').length;
+
+    return {
+      isNumber: obj.is_number === true,
+      numberCode: findNumberCode(raw) ?? '',
+      checkedInCount,
+    };
+  }
+
   /** type: "qr" | "number" | "radar" */
   async doCheckin(
     rollcallID: number,
     type: 'qr' | 'number' | 'radar',
     payload: Record<string, unknown>,
     deviceId: string,
+    timeoutMs?: number,
   ): Promise<void> {
     let endpoint: string;
     switch (type) {
@@ -132,6 +179,7 @@ export class LMSClient {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
+      timeoutMs,
     });
 
     let json: any = null;
@@ -149,7 +197,10 @@ export class LMSClient {
   // ------------ Internals ------------
 
   /** Wraps fetch to: inject our Cookie jar, capture Set-Cookie, set UA. */
-  private async rawFetch(url: string, init: RequestInit & { redirect?: 'follow' | 'manual' } = {}): Promise<Response> {
+  private async rawFetch(
+    url: string,
+    init: RequestInit & { redirect?: 'follow' | 'manual'; timeoutMs?: number } = {},
+  ): Promise<Response> {
     const u = new URL(url);
     const cookieHeader = this.jar.cookieHeader(u.host);
 
@@ -157,15 +208,28 @@ export class LMSClient {
     headers.set('User-Agent', UA);
     if (cookieHeader) headers.set('Cookie', cookieHeader);
 
-    const res = await fetch(url, { ...init, headers });
-
-    // Capture all Set-Cookie. RN/iOS exposes them via headers.get('set-cookie')
-    // (combined with comma) — but we want each one. Try a few accessors.
-    const sc = collectSetCookie(res);
-    if (sc.length > 0) {
-      this.jar.ingest(sc, u.host);
+    const { timeoutMs, ...fetchInit } = init;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let signal: AbortSignal | undefined;
+    if (timeoutMs && timeoutMs > 0) {
+      const controller = new AbortController();
+      signal = controller.signal;
+      timer = setTimeout(() => controller.abort(), timeoutMs);
     }
-    return res;
+
+    try {
+      const res = await fetch(url, { ...fetchInit, headers, signal });
+
+      // Capture all Set-Cookie. RN/iOS exposes them via headers.get('set-cookie')
+      // (combined with comma) — but we want each one. Try a few accessors.
+      const sc = collectSetCookie(res);
+      if (sc.length > 0) {
+        this.jar.ingest(sc, u.host);
+      }
+      return res;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async getCallbackURL(): Promise<string> {
@@ -191,6 +255,32 @@ export class LMSClient {
 }
 
 // ------------ Helpers ------------
+
+/**
+ * Recursively search a decoded JSON value for a `number_code` field and return
+ * it as a trimmed string, regardless of whether the server sent a string or an
+ * int. Mirrors the Go findNumberCode (depth-limited).
+ */
+function findNumberCode(data: unknown, depth = 0, maxDepth = 10): string | null {
+  if (depth > maxDepth || data == null) return null;
+  if (Array.isArray(data)) {
+    for (const item of data) {
+      const code = findNumberCode(item, depth + 1, maxDepth);
+      if (code) return code;
+    }
+    return null;
+  }
+  if (typeof data === 'object') {
+    const obj = data as Record<string, unknown>;
+    const direct = obj.number_code;
+    if (direct != null) return String(direct).trim();
+    for (const key of Object.keys(obj)) {
+      const code = findNumberCode(obj[key], depth + 1, maxDepth);
+      if (code) return code;
+    }
+  }
+  return null;
+}
 
 function absolutize(loc: string, base: string): string {
   try {

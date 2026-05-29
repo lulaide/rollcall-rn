@@ -1,277 +1,445 @@
-// Mirrors CQUPTRollcall/ViewModels/AppState.swift
-// Runtime app state: rollcalls, polling status, services lifecycle.
+// Multi-account runtime orchestration.
+// One LMSClient per account, isolated cookies/rollcalls/login state.
 
 import { create } from 'zustand';
 import { LMSClient, LMSError } from '../services/lmsClient';
-import { CenterWSClient } from '../services/centerWS';
-import { Poller } from '../services/poller';
+import { MultiAccountPoller } from '../services/poller';
 import { extractQRData } from '../services/qrUtil';
 import type { Rollcall } from '../models/rollcall';
 import type { CurriculumInstance } from '../models/curriculum';
-import { useConfig } from './config';
 import { isAbsent } from '../models/rollcall';
+import { useConfig, enabledAccounts, type AccountConfig } from './config';
 
-export interface AppState {
+export interface AccountRuntime {
+  id: string;
   isLoggedIn: boolean;
   isLoggingIn: boolean;
   loginError: string | null;
   rollcalls: Rollcall[];
   todayCourses: CurriculumInstance[];
-  centerConnected: boolean;
   isPolling: boolean;
   lastPollTime: number | null;
-  checkinMessage: string | null;
-
-  login: () => Promise<void>;
-  logout: () => void;
-  checkSession: () => Promise<void>;
-  refreshRollcalls: () => Promise<void>;
-
-  submitGlobalQR: (rawData: string) => Promise<void>;
-  checkinQR: (rollcallID: number, qrData: string) => Promise<void>;
-  checkinNumber: (rollcallID: number, number: string) => Promise<void>;
-  checkinLocation: (rollcallID: number, lat: number, lon: number) => Promise<void>;
-
-  /** Internal: clear toast after delay */
-  setCheckinMessage: (msg: string | null) => void;
 }
 
-const lms = new LMSClient();
-let centerWS: CenterWSClient | null = null;
-let poller: Poller | null = null;
+export interface ScanEntry {
+  accountId: string;
+  displayName: string;
+  courseTitle?: string;
+  error?: string;
+}
+
+export interface BatchCheckinResult {
+  newlySigned: ScanEntry[];
+  failed: ScanEntry[];
+  alreadySigned: ScanEntry[];
+  noTask: ScanEntry[];
+}
+
+export interface AppState {
+  runtimes: Record<string, AccountRuntime>;
+  checkinMessage: string | null;
+  lastScanResult: BatchCheckinResult | null;
+
+  loginAccount: (id: string) => Promise<void>;
+  loginAllEnabled: () => Promise<void>;
+  logoutAccount: (id: string) => void;
+
+  refreshAccount: (id: string) => Promise<void>;
+  refreshAllEnabled: () => Promise<void>;
+
+  batchCheckinQR: (rawData: string) => Promise<BatchCheckinResult>;
+  batchCheckinNumber: (numberCode: string, accountIds?: string[]) => Promise<BatchCheckinResult>;
+
+  // poller-driven, per account
+  processNumberTasks: (id: string) => Promise<void>;
+  autoLocationCheckin: (id: string, inst: CurriculumInstance) => Promise<void>;
+  emitTodayCourses: (id: string, courses: CurriculumInstance[]) => void;
+  emitPolling: (id: string, state: boolean, t: number) => void;
+
+  startServices: () => void;
+  stopServices: () => void;
+  syncRuntimes: () => void;
+
+  setCheckinMessage: (msg: string | null) => void;
+  clearScanResult: () => void;
+}
+
+// LMSClient instances are not part of serializable state — keep them module-level.
+const clients = new Map<string, LMSClient>();
+function clientFor(id: string): LMSClient {
+  let c = clients.get(id);
+  if (!c) {
+    c = new LMSClient();
+    clients.set(id, c);
+  }
+  return c;
+}
+
+let poller: MultiAccountPoller | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 
-export const useAppState = create<AppState>((set, get) => ({
-  isLoggedIn: false,
-  isLoggingIn: false,
-  loginError: null,
-  rollcalls: [],
-  todayCourses: [],
-  centerConnected: false,
-  isPolling: false,
-  lastPollTime: null,
-  checkinMessage: null,
+const errMsg = (e: unknown): string =>
+  e instanceof LMSError ? e.message : ((e as Error)?.message ?? '未知错误');
 
-  setCheckinMessage(msg) {
-    set({ checkinMessage: msg });
-    if (toastTimer) clearTimeout(toastTimer);
-    if (msg) {
-      toastTimer = setTimeout(() => set({ checkinMessage: null }), 2500);
-    }
-  },
+function emptyRuntime(id: string): AccountRuntime {
+  return {
+    id,
+    isLoggedIn: false,
+    isLoggingIn: false,
+    loginError: null,
+    rollcalls: [],
+    todayCourses: [],
+    isPolling: false,
+    lastPollTime: null,
+  };
+}
 
-  async login() {
-    const cfg = useConfig.getState();
-    set({ isLoggingIn: true, loginError: null });
-    try {
-      await lms.login(cfg.username, cfg.password);
-      set({ isLoggedIn: true });
-      startServices();
-    } catch (e) {
-      const msg = e instanceof LMSError ? e.message : (e as Error).message;
-      set({ loginError: msg });
-    } finally {
-      set({ isLoggingIn: false });
-    }
-  },
+function accountById(id: string): AccountConfig | undefined {
+  return useConfig.getState().accounts.find(a => a.id === id);
+}
 
-  logout() {
-    stopServices();
-    useConfig.getState().logout();
-    set({
-      isLoggedIn: false,
-      rollcalls: [],
-      todayCourses: [],
-      centerConnected: false,
-      lastPollTime: null,
+export const useAppState = create<AppState>((set, get) => {
+  const patchRuntime = (id: string, patch: Partial<AccountRuntime>) => {
+    set(state => {
+      const prev = state.runtimes[id] ?? emptyRuntime(id);
+      return { runtimes: { ...state.runtimes, [id]: { ...prev, ...patch } } };
     });
-  },
+  };
 
-  async checkSession() {
-    try {
-      const list = await lms.getRollcalls(async () => {
-        const cfg = useConfig.getState();
-        await lms.login(cfg.username, cfg.password);
-      });
-      set({ rollcalls: list, isLoggedIn: true });
-      startServices();
-    } catch {
-      set({ isLoggedIn: false });
-    }
-  },
+  const getRuntime = (id: string): AccountRuntime => get().runtimes[id] ?? emptyRuntime(id);
 
-  async refreshRollcalls() {
-    try {
-      const list = await lms.getRollcalls(async () => {
-        const cfg = useConfig.getState();
-        await lms.login(cfg.username, cfg.password);
-      });
-      set({ rollcalls: list });
-    } catch {
-      // swallow — keep existing
-    }
-  },
+  const reLogin = (id: string) => async () => {
+    const acc = accountById(id);
+    if (acc) await clientFor(id).login(acc.username, acc.password);
+  };
 
-  async submitGlobalQR(rawData) {
-    const extracted = extractQRData(rawData);
-    if (!extracted) {
-      get().setCheckinMessage('无效或过期的二维码');
-      return;
-    }
+  /** Optimistically mark a task on_call in the runtime, then async refresh. */
+  const markSigned = (id: string, rollcallID: number) => {
+    const rt = getRuntime(id);
+    patchRuntime(id, {
+      rollcalls: rt.rollcalls.map(r =>
+        r.rollcall_id === rollcallID ? { ...r, status: 'on_call' } : r,
+      ),
+    });
+  };
 
-    centerWS?.sendRollcallSuccess('qr', { rollcall_data: extracted });
+  return {
+    runtimes: {},
+    checkinMessage: null,
+    lastScanResult: null,
 
-    const qrTasks = get().rollcalls.filter(r => r.source === 'qr' && isAbsent(r));
-    if (qrTasks.length === 0) {
-      get().setCheckinMessage('已共享到 Center');
-      return;
-    }
-
-    const cfg = useConfig.getState();
-    let success = 0;
-    for (const r of qrTasks) {
-      try {
-        await lms.doCheckin(r.rollcall_id, 'qr', { data: extracted }, cfg.clientID);
-        success++;
-      } catch {}
-    }
-    if (success > 0) {
-      get().setCheckinMessage(`签到成功 (${success}门课)`);
-      await get().refreshRollcalls();
-    } else {
-      get().setCheckinMessage('已共享到 Center（本地签到失败）');
-    }
-  },
-
-  async checkinQR(rollcallID, qrData) {
-    const extracted = extractQRData(qrData);
-    if (!extracted) {
-      get().setCheckinMessage('无效或过期的二维码');
-      return;
-    }
-    const cfg = useConfig.getState();
-    try {
-      await lms.doCheckin(rollcallID, 'qr', { data: extracted }, cfg.clientID);
-      get().setCheckinMessage('扫码签到成功');
-      centerWS?.sendRollcallSuccess('qr', { rollcall_data: extracted });
-      await get().refreshRollcalls();
-    } catch (e) {
-      get().setCheckinMessage(`签到失败: ${(e as Error).message}`);
-    }
-  },
-
-  async checkinNumber(rollcallID, number) {
-    const cfg = useConfig.getState();
-    try {
-      await lms.doCheckin(rollcallID, 'number', { numberCode: number }, cfg.clientID);
-      get().setCheckinMessage('数字签到成功');
-      centerWS?.sendRollcallSuccess('number', {
-        rollcall_id: rollcallID,
-        rollcall_number: parseInt(number, 10) || 0,
-      });
-      await get().refreshRollcalls();
-    } catch (e) {
-      get().setCheckinMessage(`签到失败: ${(e as Error).message}`);
-    }
-  },
-
-  async checkinLocation(rollcallID, lat, lon) {
-    const cfg = useConfig.getState();
-    try {
-      await lms.doCheckin(rollcallID, 'radar', { lat, lon }, cfg.clientID);
-      get().setCheckinMessage('定位签到成功');
-      await get().refreshRollcalls();
-    } catch (e) {
-      get().setCheckinMessage(`签到失败: ${(e as Error).message}`);
-    }
-  },
-}));
-
-// ------------ Service lifecycle ------------
-
-function startServices() {
-  const get = useAppState.getState;
-  const set = useAppState.setState;
-  const cfg = useConfig.getState();
-
-  // CenterWS
-  if (cfg.centerServerURL) {
-    centerWS = new CenterWSClient(
-      () => {
-        const c = useConfig.getState();
-        return {
-          url: c.centerServerURL,
-          clientID: c.clientID,
-          secret: c.centerServerSecret,
-          pauseSharedRollcall: c.pauseSharedRollcall,
-        };
-      },
-      (connected) => set({ centerConnected: connected }),
-      {
-        async onQRShare(qrData) {
-          const list = get().rollcalls;
-          for (const r of list) {
-            if (r.source === 'qr' && isAbsent(r)) {
-              await get().checkinQR(r.rollcall_id, qrData);
-              break;
-            }
-          }
-        },
-        async onNumberShare(rollcallID, number) {
-          const list = get().rollcalls;
-          for (const r of list) {
-            if (r.rollcall_id === rollcallID && isAbsent(r)) {
-              await get().checkinNumber(rollcallID, String(number));
-              break;
-            }
-          }
-        },
-      },
-    );
-    centerWS.connect();
-  }
-
-  // Poller
-  poller = new Poller(
-    () => {
-      const c = useConfig.getState();
-      return {
-        studentID: c.studentID,
-        curriculumPreMinutes: c.curriculumPreMinutes,
-        autoLocationCheckin: c.autoLocationCheckin,
-      };
+    setCheckinMessage(msg) {
+      set({ checkinMessage: msg });
+      if (toastTimer) clearTimeout(toastTimer);
+      if (msg) toastTimer = setTimeout(() => set({ checkinMessage: null }), 2500);
     },
-    {
-      refreshRollcalls: () => get().refreshRollcalls(),
-      emitTodayCourses: (courses) => set({ todayCourses: courses }),
-      emitPolling: (state, t) => set({ isPolling: state, lastPollTime: t }),
-      sendTasksToCenter: () => {
-        const list = get().rollcalls;
-        const hasQR = list.some(r => r.source === 'qr' && isAbsent(r));
-        const numbers = list
-          .filter(r => r.source === 'number' && isAbsent(r))
-          .map(r => ({ rollcall_id: r.rollcall_id, course_title: r.course_title }));
-        centerWS?.sendRollcallTasks(hasQR, numbers);
-      },
-      autoLocationCheckin: async (inst) => {
-        const { getCoords } = await import('../services/locationData');
-        const coords = getCoords(inst.location);
-        if (!coords) return;
-        const list = get().rollcalls;
-        for (const r of list) {
-          if (r.source === 'radar' && isAbsent(r)) {
-            await get().checkinLocation(r.rollcall_id, coords.lat, coords.lon);
+
+    clearScanResult() {
+      set({ lastScanResult: null });
+    },
+
+    /** Ensure a runtime entry exists for every configured account. */
+    syncRuntimes() {
+      const accounts = useConfig.getState().accounts;
+      set(state => {
+        const next: Record<string, AccountRuntime> = {};
+        for (const a of accounts) {
+          next[a.id] = state.runtimes[a.id] ?? emptyRuntime(a.id);
+        }
+        return { runtimes: next };
+      });
+    },
+
+    async loginAccount(id) {
+      const acc = accountById(id);
+      if (!acc) return;
+      const client = clientFor(id);
+      patchRuntime(id, { isLoggingIn: true, loginError: null });
+
+      const attempt = async () => {
+        await client.login(acc.username, acc.password);
+        // Validate the session by actually calling an API (first login is flaky
+        // and can report a missing cookie even when it later succeeds).
+        return client.getRollcalls(reLogin(id));
+      };
+
+      try {
+        const list = await attempt();
+        patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: list, loginError: null });
+      } catch {
+        try {
+          const list = await attempt();
+          patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: list, loginError: null });
+        } catch (e2) {
+          patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: errMsg(e2) });
+        }
+      }
+    },
+
+    async loginAllEnabled() {
+      const accounts = enabledAccounts(useConfig.getState());
+      await Promise.allSettled(accounts.map(a => get().loginAccount(a.id)));
+    },
+
+    logoutAccount(id) {
+      clients.delete(id);
+      patchRuntime(id, {
+        isLoggedIn: false,
+        rollcalls: [],
+        todayCourses: [],
+        lastPollTime: null,
+        loginError: null,
+      });
+    },
+
+    async refreshAccount(id) {
+      const rt = getRuntime(id);
+      if (!rt.isLoggedIn) return;
+      try {
+        const list = await clientFor(id).getRollcalls(reLogin(id));
+        // preserve previously enriched number fields for tasks still present
+        const prevById = new Map(rt.rollcalls.map(r => [r.rollcall_id, r]));
+        const merged = list.map(r => {
+          const prev = prevById.get(r.rollcall_id);
+          return prev
+            ? { ...r, numberCode: prev.numberCode, checkedInCount: prev.checkedInCount }
+            : r;
+        });
+        patchRuntime(id, { rollcalls: merged, lastPollTime: Date.now() });
+      } catch {
+        // keep existing on transient failure
+      }
+    },
+
+    async refreshAllEnabled() {
+      const accounts = enabledAccounts(useConfig.getState());
+      await Promise.allSettled(accounts.map(a => get().refreshAccount(a.id)));
+    },
+
+    async batchCheckinQR(rawData) {
+      const result: BatchCheckinResult = {
+        newlySigned: [],
+        failed: [],
+        alreadySigned: [],
+        noTask: [],
+      };
+
+      const extracted = extractQRData(rawData);
+      if (!extracted) {
+        get().setCheckinMessage('无效或过期的二维码');
+        set({ lastScanResult: result });
+        return result;
+      }
+
+      const cfg = useConfig.getState();
+      const timeout = cfg.requestTimeoutMs;
+      const accounts = enabledAccounts(cfg);
+
+      await Promise.allSettled(
+        accounts.map(async acc => {
+          const rt = getRuntime(acc.id);
+          const entry: ScanEntry = { accountId: acc.id, displayName: acc.displayName };
+          if (!rt.isLoggedIn) {
+            result.failed.push({ ...entry, error: '未登录' });
+            return;
+          }
+          const qrAll = rt.rollcalls.filter(r => r.source === 'qr');
+          const absent = qrAll.filter(isAbsent);
+          if (qrAll.length === 0) {
+            result.noTask.push(entry);
+            return;
+          }
+          if (absent.length === 0) {
+            result.alreadySigned.push(entry);
+            return;
+          }
+          entry.courseTitle = absent[0]!.course_title;
+          let firstError: string | null = null;
+          for (const task of absent) {
+            try {
+              await clientFor(acc.id).doCheckin(task.rollcall_id, 'qr', { data: extracted }, acc.clientID, timeout);
+              markSigned(acc.id, task.rollcall_id);
+            } catch (e) {
+              if (!firstError) firstError = errMsg(e);
+            }
+          }
+          if (firstError) result.failed.push({ ...entry, error: firstError });
+          else result.newlySigned.push(entry);
+          void get().refreshAccount(acc.id);
+        }),
+      );
+
+      const n = result.newlySigned.length;
+      get().setCheckinMessage(n > 0 ? `新签到 ${n} 个账号` : '无新签到');
+      set({ lastScanResult: result });
+      return result;
+    },
+
+    async batchCheckinNumber(numberCode, accountIds) {
+      const result: BatchCheckinResult = {
+        newlySigned: [],
+        failed: [],
+        alreadySigned: [],
+        noTask: [],
+      };
+      const code = numberCode.trim();
+      if (!code) {
+        get().setCheckinMessage('请输入签到码');
+        return result;
+      }
+
+      const cfg = useConfig.getState();
+      const timeout = cfg.requestTimeoutMs;
+      let accounts = enabledAccounts(cfg);
+      if (accountIds) accounts = accounts.filter(a => accountIds.includes(a.id));
+
+      await Promise.allSettled(
+        accounts.map(async acc => {
+          const rt = getRuntime(acc.id);
+          const entry: ScanEntry = { accountId: acc.id, displayName: acc.displayName };
+          if (!rt.isLoggedIn) {
+            result.failed.push({ ...entry, error: '未登录' });
+            return;
+          }
+          const numAll = rt.rollcalls.filter(r => r.source === 'number');
+          const absent = numAll.filter(isAbsent);
+          if (numAll.length === 0) {
+            result.noTask.push(entry);
+            return;
+          }
+          if (absent.length === 0) {
+            result.alreadySigned.push(entry);
+            return;
+          }
+          entry.courseTitle = absent[0]!.course_title;
+          let firstError: string | null = null;
+          for (const task of absent) {
+            try {
+              await clientFor(acc.id).doCheckin(task.rollcall_id, 'number', { numberCode: code }, acc.clientID, timeout);
+              markSigned(acc.id, task.rollcall_id);
+            } catch (e) {
+              if (!firstError) firstError = errMsg(e);
+            }
+          }
+          if (firstError) result.failed.push({ ...entry, error: firstError });
+          else result.newlySigned.push(entry);
+          void get().refreshAccount(acc.id);
+        }),
+      );
+
+      const n = result.newlySigned.length;
+      get().setCheckinMessage(n > 0 ? `数字签到 ${n} 个账号` : '数字签到无新签到');
+      set({ lastScanResult: result });
+      return result;
+    },
+
+    async processNumberTasks(id) {
+      const rt = getRuntime(id);
+      if (!rt.isLoggedIn) return;
+      const cfg = useConfig.getState();
+      const acc = accountById(id);
+      if (!acc) return;
+
+      const numberTasks = rt.rollcalls.filter(r => r.source === 'number' && isAbsent(r));
+      if (numberTasks.length === 0) return;
+
+      const client = clientFor(id);
+      for (const task of numberTasks) {
+        let detail;
+        try {
+          detail = await client.getStudentRollcalls(task.rollcall_id, reLogin(id));
+        } catch {
+          continue;
+        }
+        if (!detail) continue;
+
+        // enrich for display (manual-entry UI shows checkedInCount / code)
+        patchRuntime(id, {
+          rollcalls: getRuntime(id).rollcalls.map(r =>
+            r.rollcall_id === task.rollcall_id
+              ? { ...r, numberCode: detail!.numberCode, checkedInCount: detail!.checkedInCount }
+              : r,
+          ),
+        });
+
+        const code = detail.numberCode;
+        if (cfg.autoNumberCheckin && detail.isNumber && code !== '' && code !== '0') {
+          try {
+            await client.doCheckin(task.rollcall_id, 'number', { numberCode: code }, acc.clientID, cfg.requestTimeoutMs);
+            markSigned(id, task.rollcall_id);
+            get().setCheckinMessage(`自动数字签到成功 (${acc.displayName})`);
+            void get().refreshAccount(id);
+          } catch {
+            // leave absent — manual fallback remains available
           }
         }
-      },
+      }
     },
-  );
-  poller.start();
-}
 
-function stopServices() {
-  centerWS?.disconnect();
-  centerWS = null;
-  poller?.stop();
-  poller = null;
-}
+    async autoLocationCheckin(id, inst) {
+      const rt = getRuntime(id);
+      if (!rt.isLoggedIn) return;
+      const acc = accountById(id);
+      if (!acc) return;
+      const radarTasks = rt.rollcalls.filter(r => r.source === 'radar' && isAbsent(r));
+      if (radarTasks.length === 0) return;
+
+      const { getCoords } = await import('../services/locationData');
+      const coords = getCoords(inst.location);
+      if (!coords) return;
+
+      const cfg = useConfig.getState();
+      for (const task of radarTasks) {
+        try {
+          await clientFor(id).doCheckin(task.rollcall_id, 'radar', { lat: coords.lat, lon: coords.lon }, acc.clientID, cfg.requestTimeoutMs);
+          markSigned(id, task.rollcall_id);
+          void get().refreshAccount(id);
+        } catch {
+          // ignore
+        }
+      }
+    },
+
+    emitTodayCourses(id, courses) {
+      patchRuntime(id, { todayCourses: courses });
+    },
+
+    emitPolling(id, state, t) {
+      patchRuntime(id, { isPolling: state, lastPollTime: t });
+    },
+
+    startServices() {
+      get().syncRuntimes();
+      if (poller) poller.stop();
+      poller = new MultiAccountPoller(
+        {
+          listAccounts: () =>
+            enabledAccounts(useConfig.getState())
+              .filter(a => get().runtimes[a.id]?.isLoggedIn)
+              .map(a => ({ id: a.id, studentID: a.studentID })),
+          env: () => {
+            const c = useConfig.getState();
+            return {
+              curriculumPreMinutes: c.curriculumPreMinutes,
+              autoLocationCheckin: c.autoLocationCheckin,
+              autoNumberCheckin: c.autoNumberCheckin,
+            };
+          },
+        },
+        {
+          refreshAccount: id => get().refreshAccount(id),
+          emitTodayCourses: (id, courses) => get().emitTodayCourses(id, courses),
+          emitPolling: (id, state, t) => get().emitPolling(id, state, t),
+          autoLocationCheckin: (id, inst) => get().autoLocationCheckin(id, inst),
+          processNumberTasks: id => get().processNumberTasks(id),
+        },
+      );
+      poller.start();
+    },
+
+    stopServices() {
+      poller?.stop();
+      poller = null;
+    },
+  };
+});
