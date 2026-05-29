@@ -1,9 +1,9 @@
 import * as Haptics from 'expo-haptics';
 import * as React from 'react';
-import { Alert, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, Modal, Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { GlassCard } from '@/src/components/Glass';
 import { IconSymbol } from '@/components/ui/icon-symbol';
@@ -14,12 +14,13 @@ import { useAppState } from '@/src/store/appState';
 
 export default function ScannerScreen() {
   const router = useRouter();
+  const { account } = useLocalSearchParams<{ account?: string }>();
 
   const batchCheckinQR = useAppState(s => s.batchCheckinQR);
 
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [scannerSupported, setScannerSupported] = React.useState(Platform.OS === 'android');
-  const [scanned, setScanned] = React.useState<string | null>(null);
+  const [submitting, setSubmitting] = React.useState(false);
   const [manualVisible, setManualVisible] = React.useState(false);
   const [manualValue, setManualValue] = React.useState('');
   const scanLockedRef = React.useRef(false);
@@ -34,24 +35,23 @@ export default function ScannerScreen() {
     return () => { cancelled = true; };
   }, []);
 
-  const handleScannedValue = React.useCallback((value?: string) => {
-    if (!value || scanLockedRef.current) return;
-    scanLockedRef.current = true;
-    setScanned(value);
-    if (Platform.OS === 'android') {
-      void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-  }, []);
-
-  const resetScan = () => {
-    scanLockedRef.current = false;
-    setScanned(null);
-  };
-
-  const submit = async (raw: string) => {
-    await batchCheckinQR(raw);
-    router.back();
-  };
+  // Scan -> submit immediately (the dynamic QR only lives ~15s; no manual confirm).
+  const handleScannedValue = React.useCallback(
+    async (value?: string) => {
+      if (!value || scanLockedRef.current) return;
+      scanLockedRef.current = true;
+      setSubmitting(true);
+      if (Platform.OS === 'android') {
+        void Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      }
+      try {
+        await batchCheckinQR(value, account ? [account] : undefined);
+      } finally {
+        router.back();
+      }
+    },
+    [batchCheckinQR, router, account],
+  );
 
   const promptManual = () => {
     setManualValue('');
@@ -65,8 +65,7 @@ export default function ScannerScreen() {
       return;
     }
     setManualVisible(false);
-    scanLockedRef.current = false;
-    handleScannedValue(value);
+    void handleScannedValue(value);
   };
 
   const renderFallback = (title = '相机扫码不可用', text = '请使用手动输入', action?: React.ReactNode) => (
@@ -98,7 +97,7 @@ export default function ScannerScreen() {
         <CameraView
           barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
           facing="back"
-          onBarcodeScanned={scanned ? undefined : event => handleScannedValue(event.data)}
+          onBarcodeScanned={submitting ? undefined : event => void handleScannedValue(event.data)}
           style={StyleSheet.absoluteFill}
         />
       );
@@ -107,9 +106,9 @@ export default function ScannerScreen() {
     if (scannerSupported) {
       return (
         <ExpoDataScannerView
-          enabled={!scanned}
+          enabled={!submitting}
           style={StyleSheet.absoluteFill}
-          onScan={e => handleScannedValue(e.nativeEvent.value)}
+          onScan={e => void handleScannedValue(e.nativeEvent.value)}
         />
       );
     }
@@ -135,32 +134,13 @@ export default function ScannerScreen() {
         </GlassCard>
       </SafeAreaView>
 
-      {scanned && (
-        <SafeAreaView edges={['bottom']} style={styles.bottomBar}>
-          <GlassCard borderRadius={18}>
-            <View style={styles.scannedHeader}>
-              <IconSymbol name="checkmark.circle.fill" size={20} color="#34d399" />
-              <Text style={styles.scannedTitle}>已识别二维码</Text>
-            </View>
-            <Text style={styles.scannedValue} numberOfLines={2}>
-              {scanned.slice(0, 80)}{scanned.length > 80 ? '…' : ''}
-            </Text>
-            <View style={styles.actionRow}>
-              <Pressable
-                onPress={resetScan}
-                style={[styles.actionBtn, styles.actionBtnSecondary]}
-              >
-                <Text style={[styles.actionText, { color: '#fff' }]}>重新扫描</Text>
-              </Pressable>
-              <Pressable
-                onPress={() => submit(scanned)}
-                style={[styles.actionBtn, styles.actionBtnPrimary]}
-              >
-                <Text style={[styles.actionText, { color: '#fff' }]}>提交签到</Text>
-              </Pressable>
-            </View>
+      {submitting && (
+        <View style={styles.submittingOverlay}>
+          <GlassCard borderRadius={18} style={styles.submittingCard}>
+            <ActivityIndicator color="#fff" size="large" />
+            <Text style={styles.submittingText}>提交签到中…</Text>
           </GlassCard>
-        </SafeAreaView>
+        </View>
       )}
 
       <Modal
@@ -244,20 +224,14 @@ const styles = StyleSheet.create({
   topBtn: { color: '#fff', fontSize: 15 },
   topTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
 
-  bottomBar: {
-    position: 'absolute',
-    bottom: 0, left: 0, right: 0,
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+  submittingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
-  scannedHeader: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  scannedTitle: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  scannedValue: {
-    color: 'rgba(235,235,245,0.7)',
-    fontSize: 12,
-    fontFamily: 'Menlo',
-    marginTop: 8,
-  },
+  submittingCard: { alignItems: 'center', gap: 14, paddingHorizontal: 36, paddingVertical: 28 },
+  submittingText: { color: '#fff', fontSize: 16, fontWeight: '600' },
   actionRow: { flexDirection: 'row', gap: 10, marginTop: 14 },
   actionBtn: {
     flex: 1,

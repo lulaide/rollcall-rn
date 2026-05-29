@@ -23,10 +23,11 @@ export interface MultiPollerEnv {
 export interface MultiPollerAccount {
   id: string;
   studentID: string;
+  isLoggedIn: boolean;
 }
 
 export interface MultiPollerSource {
-  /** enabled + logged-in accounts to poll right now */
+  /** every enabled account (curriculum is emitted for all; rollcall work is gated by isLoggedIn) */
   listAccounts(): MultiPollerAccount[];
   env(): MultiPollerEnv;
 }
@@ -74,6 +75,14 @@ export class MultiAccountPoller {
     await Promise.allSettled(
       accounts.map(async acc => {
         await this.fetchCurriculumIfNeeded(acc.studentID);
+
+        // Always surface today's courses (the curriculum tab needs them even
+        // outside the polling window and for not-yet-logged-in accounts).
+        this.emitTodayCourses(acc.id, acc.studentID);
+
+        // Rollcall discovery + auto check-in only run for logged-in accounts
+        // inside their own curriculum window.
+        if (!acc.isLoggedIn) return;
         if (!this.shouldPoll(acc.studentID, env.curriculumPreMinutes)) return;
 
         this.hooks.emitPolling(acc.id, true, Date.now());
@@ -81,8 +90,6 @@ export class MultiAccountPoller {
           await this.hooks.refreshAccount(acc.id);
         } catch {}
         this.hooks.emitPolling(acc.id, false, Date.now());
-
-        this.emitTodayCourses(acc.id, acc.studentID);
 
         if (env.autoNumberCheckin) {
           try { await this.hooks.processNumberTasks(acc.id); } catch {}

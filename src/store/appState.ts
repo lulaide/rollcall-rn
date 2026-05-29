@@ -47,8 +47,10 @@ export interface AppState {
   refreshAccount: (id: string) => Promise<void>;
   refreshAllEnabled: () => Promise<void>;
 
-  batchCheckinQR: (rawData: string) => Promise<BatchCheckinResult>;
+  batchCheckinQR: (rawData: string, accountIds?: string[]) => Promise<BatchCheckinResult>;
   batchCheckinNumber: (numberCode: string, accountIds?: string[]) => Promise<BatchCheckinResult>;
+  numberCheckinAll: (accountIds?: string[]) => Promise<BatchCheckinResult>;
+  radarCheckinAccount: (id: string) => Promise<BatchCheckinResult>;
 
   // poller-driven, per account
   processNumberTasks: (id: string) => Promise<void>;
@@ -216,7 +218,7 @@ export const useAppState = create<AppState>((set, get) => {
       await Promise.allSettled(accounts.map(a => get().refreshAccount(a.id)));
     },
 
-    async batchCheckinQR(rawData) {
+    async batchCheckinQR(rawData, accountIds) {
       const result: BatchCheckinResult = {
         newlySigned: [],
         failed: [],
@@ -233,7 +235,8 @@ export const useAppState = create<AppState>((set, get) => {
 
       const cfg = useConfig.getState();
       const timeout = cfg.requestTimeoutMs;
-      const accounts = enabledAccounts(cfg);
+      let accounts = enabledAccounts(cfg);
+      if (accountIds) accounts = accounts.filter(a => accountIds.includes(a.id));
 
       await Promise.allSettled(
         accounts.map(async acc => {
@@ -333,6 +336,132 @@ export const useAppState = create<AppState>((set, get) => {
       return result;
     },
 
+    async numberCheckinAll(accountIds) {
+      const result: BatchCheckinResult = {
+        newlySigned: [],
+        failed: [],
+        alreadySigned: [],
+        noTask: [],
+      };
+      const cfg = useConfig.getState();
+      const timeout = cfg.requestTimeoutMs;
+      let accounts = enabledAccounts(cfg);
+      if (accountIds) accounts = accounts.filter(a => accountIds.includes(a.id));
+
+      await Promise.allSettled(
+        accounts.map(async acc => {
+          const rt = getRuntime(acc.id);
+          const entry: ScanEntry = { accountId: acc.id, displayName: acc.displayName };
+          if (!rt.isLoggedIn) {
+            result.failed.push({ ...entry, error: '未登录' });
+            return;
+          }
+          const numAll = rt.rollcalls.filter(r => r.source === 'number');
+          const absent = numAll.filter(isAbsent);
+          if (numAll.length === 0) {
+            result.noTask.push(entry);
+            return;
+          }
+          if (absent.length === 0) {
+            result.alreadySigned.push(entry);
+            return;
+          }
+          entry.courseTitle = absent[0]!.course_title;
+          const client = clientFor(acc.id);
+          let firstError: string | null = null;
+          let signedAny = false;
+          for (const task of absent) {
+            // fetch the live code for this rollcall, fall back to any enriched value
+            let code = task.numberCode ?? '';
+            try {
+              const detail = await client.getStudentRollcalls(task.rollcall_id, reLogin(acc.id));
+              if (detail) code = detail.numberCode;
+            } catch {}
+            if (code === '' || code === '0') {
+              if (!firstError) firstError = '签到码未生效';
+              continue;
+            }
+            try {
+              await client.doCheckin(task.rollcall_id, 'number', { numberCode: code }, acc.clientID, timeout);
+              markSigned(acc.id, task.rollcall_id);
+              signedAny = true;
+            } catch (e) {
+              if (!firstError) firstError = errMsg(e);
+            }
+          }
+          if (signedAny) result.newlySigned.push(entry);
+          else result.failed.push({ ...entry, error: firstError ?? '签到失败' });
+          void get().refreshAccount(acc.id);
+        }),
+      );
+
+      const n = result.newlySigned.length;
+      get().setCheckinMessage(n > 0 ? `数字签到 ${n} 个账号` : '数字签到无新签到');
+      set({ lastScanResult: result });
+      return result;
+    },
+
+    async radarCheckinAccount(id) {
+      const result: BatchCheckinResult = {
+        newlySigned: [],
+        failed: [],
+        alreadySigned: [],
+        noTask: [],
+      };
+      const acc = accountById(id);
+      const rt = getRuntime(id);
+      const entry: ScanEntry = { accountId: id, displayName: acc?.displayName ?? id };
+      if (!acc || !rt.isLoggedIn) {
+        result.failed.push({ ...entry, error: '未登录' });
+        set({ lastScanResult: result });
+        return result;
+      }
+
+      const radarAll = rt.rollcalls.filter(r => r.source === 'radar');
+      const absent = radarAll.filter(isAbsent);
+      if (radarAll.length === 0) {
+        result.noTask.push(entry);
+        set({ lastScanResult: result });
+        return result;
+      }
+      if (absent.length === 0) {
+        result.alreadySigned.push(entry);
+        set({ lastScanResult: result });
+        return result;
+      }
+
+      const { isInstanceNow } = await import('../models/curriculum');
+      const { getCoords } = await import('../services/locationData');
+      const inst = rt.todayCourses.find(c => isInstanceNow(c));
+      const coords = inst ? getCoords(inst.location) : null;
+      if (!coords) {
+        result.failed.push({ ...entry, error: '无法定位当前课程位置' });
+        set({ lastScanResult: result });
+        return result;
+      }
+
+      entry.courseTitle = inst!.course;
+      const cfg = useConfig.getState();
+      let firstError: string | null = null;
+      let signedAny = false;
+      for (const task of absent) {
+        try {
+          await clientFor(id).doCheckin(task.rollcall_id, 'radar', { lat: coords.lat, lon: coords.lon }, acc.clientID, cfg.requestTimeoutMs);
+          markSigned(id, task.rollcall_id);
+          signedAny = true;
+        } catch (e) {
+          if (!firstError) firstError = errMsg(e);
+        }
+      }
+      if (signedAny) result.newlySigned.push(entry);
+      else result.failed.push({ ...entry, error: firstError ?? '签到失败' });
+      void get().refreshAccount(id);
+
+      get().setCheckinMessage(signedAny ? `定位签到成功 (${acc.displayName})` : '定位签到失败');
+      set({ lastScanResult: result });
+      return result;
+    },
+
     async processNumberTasks(id) {
       const rt = getRuntime(id);
       if (!rt.isLoggedIn) return;
@@ -414,9 +543,11 @@ export const useAppState = create<AppState>((set, get) => {
       poller = new MultiAccountPoller(
         {
           listAccounts: () =>
-            enabledAccounts(useConfig.getState())
-              .filter(a => get().runtimes[a.id]?.isLoggedIn)
-              .map(a => ({ id: a.id, studentID: a.studentID })),
+            enabledAccounts(useConfig.getState()).map(a => ({
+              id: a.id,
+              studentID: a.studentID,
+              isLoggedIn: !!get().runtimes[a.id]?.isLoggedIn,
+            })),
           env: () => {
             const c = useConfig.getState();
             return {

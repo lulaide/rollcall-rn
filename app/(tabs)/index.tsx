@@ -10,6 +10,7 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import { useRouter } from 'expo-router';
 
 import { GlassCard, GlassToast } from '@/src/components/Glass';
@@ -47,10 +48,15 @@ export default function DashboardScreen() {
   const lastScanResult = useAppState(s => s.lastScanResult);
   const loginAccount = useAppState(s => s.loginAccount);
   const batchCheckinNumber = useAppState(s => s.batchCheckinNumber);
+  const numberCheckinAll = useAppState(s => s.numberCheckinAll);
+  const radarCheckinAccount = useAppState(s => s.radarCheckinAccount);
   const clearScanResult = useAppState(s => s.clearScanResult);
 
+  const tabBarHeight = useBottomTabBarHeight();
   const [numberCode, setNumberCode] = React.useState('');
   const [submittingNumber, setSubmittingNumber] = React.useState(false);
+  const [batchNumberBusy, setBatchNumberBusy] = React.useState(false);
+  const [busyAccount, setBusyAccount] = React.useState<string | null>(null);
 
   const rtFor = (id: string): AccountRuntime =>
     runtimes[id] ?? {
@@ -85,6 +91,40 @@ export default function DashboardScreen() {
     }
   };
 
+  const submitNumberAll = async () => {
+    if (batchNumberBusy) return;
+    setBatchNumberBusy(true);
+    try {
+      await numberCheckinAll();
+    } finally {
+      setBatchNumberBusy(false);
+    }
+  };
+
+  // Per-account fallback: sign just one account when batch missed it.
+  const scanForAccount = (id: string) =>
+    router.push({ pathname: '/scanner', params: { account: id } });
+
+  const numberForAccount = async (id: string) => {
+    if (busyAccount) return;
+    setBusyAccount(id);
+    try {
+      await numberCheckinAll([id]);
+    } finally {
+      setBusyAccount(null);
+    }
+  };
+
+  const radarForAccount = async (id: string) => {
+    if (busyAccount) return;
+    setBusyAccount(id);
+    try {
+      await radarCheckinAccount(id);
+    } finally {
+      setBusyAccount(null);
+    }
+  };
+
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.headerRow}>
@@ -107,14 +147,36 @@ export default function DashboardScreen() {
               key={acc.id}
               account={acc}
               runtime={rtFor(acc.id)}
+              busy={busyAccount === acc.id}
               onRetry={() => void loginAccount(acc.id)}
+              onScan={() => scanForAccount(acc.id)}
+              onNumber={() => void numberForAccount(acc.id)}
+              onRadar={() => void radarForAccount(acc.id)}
             />
           ))
         )}
 
         {hasNumberTask && (
           <GlassCard borderRadius={14} style={{ marginTop: 4 }}>
-            <Text style={styles.numberTitle}>数字签到码</Text>
+            <Text style={styles.numberTitle}>数字签到</Text>
+            <Pressable
+              onPress={submitNumberAll}
+              disabled={batchNumberBusy}
+              style={({ pressed }) => [
+                styles.numberAllButton,
+                batchNumberBusy && styles.numberSubmitDisabled,
+                pressed && { opacity: 0.9 },
+              ]}
+            >
+              {batchNumberBusy ? (
+                <ActivityIndicator color="#fff" size="small" />
+              ) : (
+                <>
+                  <IconSymbol name="number.circle" size={20} color="#fff" />
+                  <Text style={styles.numberAllText}>一起数字签到</Text>
+                </>
+              )}
+            </Pressable>
             <Text style={styles.numberHint}>
               自动取码失败时，输入老师提供的签到码，提交给所有未签的数字任务
             </Text>
@@ -148,8 +210,8 @@ export default function DashboardScreen() {
         )}
       </ScrollView>
 
-      {/* Sticky scan bar */}
-      <SafeAreaView edges={['bottom']} style={styles.scanBar}>
+      {/* Sticky scan bar, docked just above the tab bar */}
+      <View style={[styles.scanBar, { bottom: tabBarHeight + 8 }]}>
         <Pressable
           onPress={onScan}
           style={({ pressed }) => [styles.scanButton, pressed && { opacity: 0.9 }]}
@@ -157,7 +219,7 @@ export default function DashboardScreen() {
           <IconSymbol name="qrcode.viewfinder" size={24} color="#fff" />
           <Text style={styles.scanButtonText}>扫码签到</Text>
         </Pressable>
-      </SafeAreaView>
+      </View>
 
       {checkinMessage && (
         <View pointerEvents="none" style={styles.toastWrap}>
@@ -180,11 +242,19 @@ export default function DashboardScreen() {
 function AccountCard({
   account,
   runtime,
+  busy,
   onRetry,
+  onScan,
+  onNumber,
+  onRadar,
 }: {
   account: AccountConfig;
   runtime: AccountRuntime;
+  busy: boolean;
   onRetry: () => void;
+  onScan: () => void;
+  onNumber: () => void;
+  onRadar: () => void;
 }) {
   const status = cardStatus(account, runtime);
   const color = STATUS_COLOR[status];
@@ -193,6 +263,7 @@ function AccountCard({
   const num = absent.filter(r => r.source === 'number').length;
   const radar = absent.filter(r => r.source === 'radar').length;
   const numberTask = runtime.rollcalls.find(r => r.source === 'number' && isAbsent(r));
+  const showFallback = account.enabled && runtime.isLoggedIn && absent.length > 0;
 
   let statusText: string;
   if (!account.enabled) statusText = '已禁用';
@@ -226,6 +297,25 @@ function AccountCard({
           {numberTask?.checkedInCount != null && (
             <Text style={styles.cardSub}>已签 {numberTask.checkedInCount} 人</Text>
           )}
+          {showFallback && (
+            <View style={styles.fallbackRow}>
+              {busy ? (
+                <ActivityIndicator size="small" color="rgba(235,235,245,0.7)" />
+              ) : (
+                <>
+                  {qr > 0 && (
+                    <FallbackBtn label="扫码" icon="qrcode.viewfinder" onPress={onScan} />
+                  )}
+                  {num > 0 && (
+                    <FallbackBtn label="数字" icon="number.circle" onPress={onNumber} />
+                  )}
+                  {radar > 0 && (
+                    <FallbackBtn label="定位" icon="location.circle" onPress={onRadar} />
+                  )}
+                </>
+              )}
+            </View>
+          )}
         </View>
         {status === 'red' ? (
           <Pressable onPress={onRetry} style={styles.retryButton}>
@@ -236,6 +326,26 @@ function AccountCard({
         ) : null}
       </View>
     </GlassCard>
+  );
+}
+
+function FallbackBtn({
+  label,
+  icon,
+  onPress,
+}: {
+  label: string;
+  icon: React.ComponentProps<typeof IconSymbol>['name'];
+  onPress: () => void;
+}) {
+  return (
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [styles.fallbackBtn, pressed && { opacity: 0.8 }]}
+    >
+      <IconSymbol name={icon} size={15} color="#3478f6" />
+      <Text style={styles.fallbackBtnText}>{label}</Text>
+    </Pressable>
   );
 }
 
@@ -341,6 +451,17 @@ const styles = StyleSheet.create({
   cardTime: { color: 'rgba(235,235,245,0.5)', fontSize: 12 },
   cardStatus: { color: 'rgba(235,235,245,0.75)', fontSize: 13 },
   cardSub: { color: '#34d399', fontSize: 12 },
+  fallbackRow: { flexDirection: 'row', gap: 8, marginTop: 10, flexWrap: 'wrap' },
+  fallbackBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(52,120,246,0.18)',
+  },
+  fallbackBtnText: { color: '#3478f6', fontSize: 13, fontWeight: '600' },
   retryButton: {
     alignSelf: 'center',
     marginRight: 14,
@@ -352,7 +473,18 @@ const styles = StyleSheet.create({
   retryText: { color: '#ff453a', fontSize: 13, fontWeight: '600' },
 
   numberTitle: { color: '#fff', fontSize: 15, fontWeight: '600' },
-  numberHint: { color: 'rgba(235,235,245,0.55)', fontSize: 12, marginTop: 4 },
+  numberAllButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    height: 46,
+    borderRadius: 12,
+    marginTop: 12,
+    backgroundColor: '#34d399',
+  },
+  numberAllText: { color: '#fff', fontSize: 16, fontWeight: '700' },
+  numberHint: { color: 'rgba(235,235,245,0.55)', fontSize: 12, marginTop: 12 },
   numberRow: { flexDirection: 'row', gap: 10, marginTop: 12 },
   numberInput: {
     flex: 1,
@@ -378,9 +510,8 @@ const styles = StyleSheet.create({
 
   scanBar: {
     position: 'absolute',
-    bottom: 0, left: 0, right: 0,
+    left: 0, right: 0,
     paddingHorizontal: 20,
-    paddingBottom: 8,
   },
   scanButton: {
     flexDirection: 'row',
@@ -396,7 +527,7 @@ const styles = StyleSheet.create({
   toastWrap: { position: 'absolute', bottom: 90, left: 0, right: 0, alignItems: 'center' },
 
   sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
-  sheet: { margin: 12, padding: 20 },
+  sheet: { margin: 12, padding: 20, backgroundColor: '#1c1c1e' },
   sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 },
   sheetActions: { flexDirection: 'row', gap: 10, marginTop: 14 },
   sheetBtn: { flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: 'center' },
