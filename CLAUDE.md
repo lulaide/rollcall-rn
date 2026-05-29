@@ -22,7 +22,8 @@ The product is renamed to **云小北** (Yunxiaobei). Branding rules:
 - App identity is fully renamed to the 云小北 series: `app.json` `name`/`slug`/`scheme`, iOS `bundleIdentifier`, iOS `CFBundleDisplayName`, Android `package`, and `package.json` `name`. CI artifact names and the AltStore `source.json` branding in `.github/workflows/build.yml` follow.
 - **Do NOT change CQUPT API hosts.** `lms.tc.cqupt.edu.cn`, `identity.tc.cqupt.edu.cn`, `ids.cqupt.edu.cn`, `cqupt.ishub.top` are real endpoints — renaming them breaks login/rollcall/curriculum. The `cqupt` in these URLs is infrastructure, not branding.
 - The `// Mirrors CQUPTRollcall/...Swift` comments are dev annotations (not UI); optional to clean up.
-- Logo: a flat cartoon **white cat on a pink/warm background**. App icons must be PNG (non-transparent), generated from hand-authored SVG via a `sharp`-based script into `assets/images/` (`icon.png`, `favicon.png`, `splash-icon.png`, `android-icon-foreground/background/monochrome.png`).
+- Logo: a flat **white cloud on a black background**. App icons must be PNG (non-transparent), generated from hand-authored SVG via a `sharp`-based script (`scripts/gen-icons.js`) into `assets/images/` (`icon.png`, `favicon.png`, `splash-icon.png`, `android-icon-foreground/background/monochrome.png`).
+- Native splash is logo-free: `expo-splash-screen` uses a transparent `splash-blank.png` over a solid dark background. The plugin always writes a `@drawable/splashscreen_logo` reference into the Android splash theme, so an image MUST be provided or `processReleaseResources` fails with "resource drawable/splashscreen_logo not found". The visible startup "hello" transition is handled in `app/_layout.tsx`, not the native splash.
 
 ## Common commands
 
