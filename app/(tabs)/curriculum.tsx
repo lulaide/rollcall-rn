@@ -5,10 +5,16 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { GlassCard } from '@/src/components/Glass';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useAppState } from '@/src/store/appState';
+import { useConfig, enabledAccounts } from '@/src/store/config';
 import { type CurriculumInstance, isInstanceNow } from '@/src/models/curriculum';
 
+const EMPTY_COURSES: CurriculumInstance[] = [];
+
 export default function CurriculumScreen() {
-  const todayCourses = useAppState(s => s.todayCourses);
+  const firstEnabledId = useConfig(s => enabledAccounts(s)[0]?.id);
+  const todayCourses = useAppState(s =>
+    firstEnabledId ? (s.runtimes[firstEnabledId]?.todayCourses ?? EMPTY_COURSES) : EMPTY_COURSES,
+  );
 
   return (
     <SafeAreaView style={styles.safe} edges={['top']}>

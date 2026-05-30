@@ -9,6 +9,10 @@ export interface Rollcall {
   status: RollcallStatus;
   course_title: string;
   rollcall_time?: string | null;
+
+  // Enriched client-side for number tasks via getStudentRollcalls.
+  numberCode?: string;
+  checkedInCount?: number;
 }
 
 export interface RollcallsResponse {

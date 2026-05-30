@@ -72,9 +72,12 @@ jobs:
 
       - name: Build unsigned .app
         run: |
+          WORKSPACE=$(ls -d ios/*.xcworkspace | head -1)
+          SCHEME=$(basename "$WORKSPACE" .xcworkspace)
+          echo "Using workspace=$WORKSPACE scheme=$SCHEME"
           xcodebuild \
-            -workspace ios/CQUPTRollcall.xcworkspace \
-            -scheme CQUPTRollcall \
+            -workspace "$WORKSPACE" \
+            -scheme "$SCHEME" \
             -sdk iphoneos \
             -configuration Release \
             -derivedDataPath build \
@@ -96,13 +99,13 @@ jobs:
           echo "Found app: $APP_PATH"
           mkdir -p Payload
           cp -r "$APP_PATH" Payload/
-          zip -qr CQUPTRollcall.ipa Payload
-          ls -lh CQUPTRollcall.ipa
+          zip -qr Yunxiaobei.ipa Payload
+          ls -lh Yunxiaobei.ipa
 
       - uses: actions/upload-artifact@v4
         with:
           name: ios-ipa
-          path: CQUPTRollcall.ipa
+          path: Yunxiaobei.ipa
 
   # ─────────────────────────────────────────────────────────────
   # Android APK (release, unsigned debug-signed)
@@ -147,13 +150,13 @@ jobs:
         run: |
           APK=$(find android/app/build/outputs/apk/release -name "*.apk" | head -1)
           if [ -z "$APK" ]; then echo "::error::no APK"; exit 1; fi
-          cp "$APK" CQUPTRollcall.apk
-          ls -lh CQUPTRollcall.apk
+          cp "$APK" Yunxiaobei.apk
+          ls -lh Yunxiaobei.apk
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-apk
-          path: CQUPTRollcall.apk
+          path: Yunxiaobei.apk
 
   # ─────────────────────────────────────────────────────────────
   # Web static export
@@ -195,28 +198,28 @@ jobs:
       - name: Generate source.json (AltStore / SideStore source)
         run: |
           export DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          export IPA_SIZE=$(stat -c%s CQUPTRollcall.ipa)
+          export IPA_SIZE=$(stat -c%s Yunxiaobei.ipa)
 
           python3 -c "
           import json, os
           source = {
-            'name': 'CQUPT Rollcall (RN)',
-            'subtitle': '重邮自动签到',
-            'description': '重庆邮电大学自动签到 React Native 客户端，支持 iOS/Android/Web。',
+            'name': '云小北',
+            'subtitle': '多账号自动签到',
+            'description': '多账号自动签到 React Native 客户端，支持 iOS/Android/Web。',
             'iconURL': f'https://github.com/{os.environ[\"REPO\"]}/releases/download/{os.environ[\"TAG\"]}/icon.png',
             'apps': [{
-              'name': 'CQUPT签到',
-              'bundleIdentifier': 'com.cqupt.rollcall.CQUPTRollcall',
-              'developerName': 'Auto-CQUPT-Plan',
-              'subtitle': '重邮自动签到',
-              'localizedDescription': '重庆邮电大学自动签到。React Native + 原生 VisionKit 扫码 + iOS 26 Liquid Glass。',
+              'name': '云小北',
+              'bundleIdentifier': 'com.yunxiaobei.app',
+              'developerName': 'Yunxiaobei',
+              'subtitle': '多账号自动签到',
+              'localizedDescription': '多账号自动签到。React Native + 原生 VisionKit 扫码 + iOS 26 Liquid Glass。',
               'iconURL': f'https://github.com/{os.environ[\"REPO\"]}/releases/download/{os.environ[\"TAG\"]}/icon.png',
-              'tintColor': '007AFF',
+              'tintColor': 'FF8FA3',
               'versions': [{
                 'version': os.environ['VERSION'],
                 'date': os.environ['DATE'],
                 'localizedDescription': f'{os.environ[\"VERSION\"]} ({os.environ[\"TAG\"]})',
-                'downloadURL': f'https://github.com/{os.environ[\"REPO\"]}/releases/download/{os.environ[\"TAG\"]}/CQUPTRollcall.ipa',
+                'downloadURL': f'https://github.com/{os.environ[\"REPO\"]}/releases/download/{os.environ[\"TAG\"]}/Yunxiaobei.ipa',
                 'size': int(os.environ['IPA_SIZE'])
               }],
               'appPermissions': {
@@ -246,8 +249,8 @@ jobs:
           tag_name: ${{ needs.version.outputs.tag }}
           name: ${{ needs.version.outputs.version }} (${{ needs.version.outputs.short }})
           files: |
-            CQUPTRollcall.ipa
-            CQUPTRollcall.apk
+            Yunxiaobei.ipa
+            Yunxiaobei.apk
             source.json
             icon.png
           make_latest: true
@@ -257,7 +260,7 @@ jobs:
   # Pages: deploy web preview
   # ─────────────────────────────────────────────────────────────
   pages:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && github.repository == 'lulaide/rollcall-rn'
     needs: web
     runs-on: ubuntu-latest
     environment:
