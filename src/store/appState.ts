@@ -86,7 +86,6 @@ function clientFor(id: string): LMSClient {
 
 let poller: MultiAccountPoller | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
-const loginCooldownUntil = new Map<string, number>();
 const accountCredentialKeys = new Map<string, string>();
 const accountCredentialKeysLoaded = new Set<string>();
 
@@ -136,7 +135,6 @@ export const useAppState = create<AppState>((set, get) => {
   const getRuntime = (id: string): AccountRuntime => get().runtimes[id] ?? emptyRuntime(id);
 
   const disposeAccountRuntime = (id: string, options?: { deleteCookies?: boolean; removeRuntime?: boolean }) => {
-    loginCooldownUntil.delete(id);
     clients.get(id)?.clearSession();
     clients.delete(id);
     accountCredentialKeys.delete(id);
@@ -172,27 +170,9 @@ export const useAppState = create<AppState>((set, get) => {
     storage.set(credentialStorageKey(acc.id), nextKey);
   };
 
-  const handleNonRetryableLogin = (id: string, e: unknown) => {
-    if (!(e instanceof LMSError) || e.retryable) return false;
-    loginCooldownUntil.set(id, Date.now() + 10 * 60_000);
-    patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: errMsg(e) });
-    return true;
-  };
-
   const reLogin = (id: string) => async () => {
     const acc = accountById(id);
-    if (!acc) return;
-    const cooldownUntil = loginCooldownUntil.get(id) ?? 0;
-    if (Date.now() < cooldownUntil) {
-      throw new LMSError('统一认证临时限制登录，请稍后再试', 'login', false);
-    }
-    invalidateSessionIfCredentialsChanged(acc);
-    try {
-      await clientFor(id).login(acc.username, acc.password);
-    } catch (e) {
-      handleNonRetryableLogin(id, e);
-      throw e;
-    }
+    if (acc) await clientFor(id).login(acc.username, acc.password);
   };
 
   /** Optimistically mark a task on_call in the runtime, then async refresh. */
@@ -229,14 +209,10 @@ export const useAppState = create<AppState>((set, get) => {
       for (const id of Array.from(clients.keys())) {
         if (!accountIds.has(id)) {
           clients.delete(id);
-          loginCooldownUntil.delete(id);
           accountCredentialKeys.delete(id);
           accountCredentialKeysLoaded.delete(id);
           storage.delete(credentialStorageKey(id));
         }
-      }
-      for (const id of Array.from(loginCooldownUntil.keys())) {
-        if (!accountIds.has(id)) loginCooldownUntil.delete(id);
       }
       for (const id of Array.from(accountCredentialKeys.keys())) {
         if (!accountIds.has(id)) {
@@ -258,12 +234,6 @@ export const useAppState = create<AppState>((set, get) => {
       const acc = accountById(id);
       if (!acc) return;
       invalidateSessionIfCredentialsChanged(acc);
-      const cooldownUntil = loginCooldownUntil.get(id) ?? 0;
-      if (Date.now() < cooldownUntil) {
-        patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: '统一认证临时限制登录，请稍后再试' });
-        return;
-      }
-
       const client = clientFor(id);
       patchRuntime(id, { isLoggingIn: true, loginError: null });
 
@@ -275,7 +245,6 @@ export const useAppState = create<AppState>((set, get) => {
       try {
         const cached = await client.getRollcallsIfSessionValid();
         if (cached) {
-          loginCooldownUntil.delete(id);
           patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: cached, loginError: null });
           return;
         }
@@ -285,16 +254,12 @@ export const useAppState = create<AppState>((set, get) => {
 
       try {
         const list = await attempt();
-        loginCooldownUntil.delete(id);
         patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: list, loginError: null });
-      } catch (e) {
-        if (handleNonRetryableLogin(id, e)) return;
+      } catch {
         try {
           const list = await attempt();
-          loginCooldownUntil.delete(id);
           patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: list, loginError: null });
         } catch (e2) {
-          handleNonRetryableLogin(id, e2);
           patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: errMsg(e2) });
         }
       }
@@ -697,7 +662,6 @@ export const useAppState = create<AppState>((set, get) => {
     clearAllRuntime() {
       for (const client of clients.values()) client.clearSession();
       clients.clear();
-      loginCooldownUntil.clear();
       for (const id of accountCredentialKeys.keys()) storage.delete(credentialStorageKey(id));
       accountCredentialKeys.clear();
       accountCredentialKeysLoaded.clear();
