@@ -49,15 +49,15 @@ function scaled(inner, s) {
 
 const iconFull = svg(`
   <rect width="1024" height="1024" fill="${BG}"/>
-  ${cloud()}`);
+  ${scaled(cloud(), 0.82)}`);
 
 const iconRounded = svg(`
   <rect width="1024" height="1024" rx="232" ry="232" fill="${BG}"/>
-  ${cloud()}`);
+  ${scaled(cloud(), 0.82)}`);
 
-const fgCloud = svg(scaled(cloud(), 0.82));
+const fgCloud = svg(scaled(cloud(), 0.62));
 const bgBlack = svg(`<rect width="1024" height="1024" fill="${BG}"/>`);
-const monoCloud = svg(scaled(cloud({ fill: '#000000' }), 0.82));
+const monoCloud = svg(scaled(cloud({ fill: '#000000' }), 0.62));
 
 async function render(svgStr, file, size) {
   const buf = Buffer.from(svgStr);

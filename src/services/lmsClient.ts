@@ -113,12 +113,12 @@ export class LMSClient {
             redirectURL = loc ? absolutize(loc, loginURL) : null;
           } else if (res2.status === 200) {
             const body2 = await res2.text();
-            const blockingError = classifyLoginBlock(body2);
+            const blockingError = classifyLoginFailure(body2);
             if (blockingError) throw new LMSError(blockingError, 'login', false);
           }
         }
       } else {
-        const blockingError = classifyLoginBlock(body);
+        const blockingError = classifyLoginFailure(body);
         if (blockingError) throw new LMSError(blockingError, 'login', false);
       }
     }
@@ -302,11 +302,14 @@ export class LMSClient {
   private async getLoginPageParams(loginURL: string): Promise<{ salt: string; execution: string }> {
     const res = await this.rawFetch(loginURL);
     const html = await res.text();
-    const blockingError = classifyLoginBlock(html);
-    if (blockingError) throw new LMSError(blockingError, 'login', false);
+    const execution = extractExecution(html) ?? '';
+    if (!execution) {
+      const blockingError = classifyLoginFailure(html);
+      if (blockingError) throw new LMSError(blockingError, 'login', false);
+    }
     return {
       salt: extractValueByID(html, 'pwdEncryptSalt') ?? '',
-      execution: extractExecution(html) ?? '',
+      execution,
     };
   }
 }
@@ -347,16 +350,16 @@ function absolutize(loc: string, base: string): string {
   }
 }
 
-function classifyLoginBlock(html: string): string | null {
+function classifyLoginFailure(html: string): string | null {
   const text = stripHtml(html).replace(/\s+/g, ' ');
-  if (/验证码|captcha|请输入验证码|图形码/i.test(text)) {
-    return '统一认证需要图形验证码，请等待或用浏览器完成验证后再试';
-  }
   if (/锁定|封禁|冻结|限制|10\s*分钟|十分钟|稍后再试|过于频繁/i.test(text)) {
-    return '统一认证已限制登录，请等待 10 分钟后再试';
+    return '统一认证已限制登录，请稍后再试';
   }
   if (/密码错误|账号或密码错误|用户名或密码错误|认证失败|登录失败|密码有误/i.test(text)) {
     return '账号或密码错误，请先检查账号密码，已停止自动重试';
+  }
+  if (/(请输入|输入|填写).{0,12}(验证码|图形码)|验证码.{0,12}(错误|不正确|不能为空)|captcha.{0,24}(required|invalid|error)/i.test(text)) {
+    return '统一认证需要验证码，本次自动登录未完成';
   }
   return null;
 }

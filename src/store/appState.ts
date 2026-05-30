@@ -9,6 +9,7 @@ import { extractQRData } from '../services/qrUtil';
 import type { Rollcall } from '../models/rollcall';
 import type { CurriculumInstance } from '../models/curriculum';
 import { isAbsent } from '../models/rollcall';
+import { storage } from './storage';
 import { useConfig, enabledAccounts, type AccountConfig } from './config';
 
 export interface AccountRuntime {
@@ -35,6 +36,7 @@ export interface BatchCheckinResult {
   alreadySigned: ScanEntry[];
   noTask: ScanEntry[];
   message?: string;
+  accountIds?: string[];
 }
 
 export interface AppState {
@@ -86,6 +88,7 @@ let poller: MultiAccountPoller | null = null;
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
 const loginCooldownUntil = new Map<string, number>();
 const accountCredentialKeys = new Map<string, string>();
+const accountCredentialKeysLoaded = new Set<string>();
 
 const errMsg = (e: unknown): string =>
   e instanceof LMSError ? e.message : ((e as Error)?.message ?? '未知错误');
@@ -120,6 +123,8 @@ function credentialKey(acc: AccountConfig): string {
   });
 }
 
+const credentialStorageKey = (id: string): string => `account_credential_key_${id}`;
+
 export const useAppState = create<AppState>((set, get) => {
   const patchRuntime = (id: string, patch: Partial<AccountRuntime>) => {
     set(state => {
@@ -135,6 +140,8 @@ export const useAppState = create<AppState>((set, get) => {
     clients.get(id)?.clearSession();
     clients.delete(id);
     accountCredentialKeys.delete(id);
+    accountCredentialKeysLoaded.delete(id);
+    storage.delete(credentialStorageKey(id));
     if (options?.deleteCookies) deleteSessionCookies(id);
     set(state => {
       if (options?.removeRuntime) {
@@ -147,17 +154,45 @@ export const useAppState = create<AppState>((set, get) => {
 
   const invalidateSessionIfCredentialsChanged = (acc: AccountConfig) => {
     const nextKey = credentialKey(acc);
+    if (!accountCredentialKeysLoaded.has(acc.id)) {
+      const persistedKey = storage.getString(credentialStorageKey(acc.id));
+      if (persistedKey) accountCredentialKeys.set(acc.id, persistedKey);
+      accountCredentialKeysLoaded.add(acc.id);
+    }
     const prevKey = accountCredentialKeys.get(acc.id);
     if (prevKey === nextKey) return;
     if (prevKey != null) {
       disposeAccountRuntime(acc.id, { deleteCookies: true });
+    } else {
+      clients.delete(acc.id);
+      deleteSessionCookies(acc.id);
     }
     accountCredentialKeys.set(acc.id, nextKey);
+    accountCredentialKeysLoaded.add(acc.id);
+    storage.set(credentialStorageKey(acc.id), nextKey);
+  };
+
+  const handleNonRetryableLogin = (id: string, e: unknown) => {
+    if (!(e instanceof LMSError) || e.retryable) return false;
+    loginCooldownUntil.set(id, Date.now() + 10 * 60_000);
+    patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: errMsg(e) });
+    return true;
   };
 
   const reLogin = (id: string) => async () => {
     const acc = accountById(id);
-    if (acc) await clientFor(id).login(acc.username, acc.password);
+    if (!acc) return;
+    const cooldownUntil = loginCooldownUntil.get(id) ?? 0;
+    if (Date.now() < cooldownUntil) {
+      throw new LMSError('统一认证临时限制登录，请稍后再试', 'login', false);
+    }
+    invalidateSessionIfCredentialsChanged(acc);
+    try {
+      await clientFor(id).login(acc.username, acc.password);
+    } catch (e) {
+      handleNonRetryableLogin(id, e);
+      throw e;
+    }
   };
 
   /** Optimistically mark a task on_call in the runtime, then async refresh. */
@@ -196,13 +231,19 @@ export const useAppState = create<AppState>((set, get) => {
           clients.delete(id);
           loginCooldownUntil.delete(id);
           accountCredentialKeys.delete(id);
+          accountCredentialKeysLoaded.delete(id);
+          storage.delete(credentialStorageKey(id));
         }
       }
       for (const id of Array.from(loginCooldownUntil.keys())) {
         if (!accountIds.has(id)) loginCooldownUntil.delete(id);
       }
       for (const id of Array.from(accountCredentialKeys.keys())) {
-        if (!accountIds.has(id)) accountCredentialKeys.delete(id);
+        if (!accountIds.has(id)) {
+          accountCredentialKeys.delete(id);
+          accountCredentialKeysLoaded.delete(id);
+          storage.delete(credentialStorageKey(id));
+        }
       }
       set(state => {
         const next: Record<string, AccountRuntime> = {};
@@ -247,19 +288,13 @@ export const useAppState = create<AppState>((set, get) => {
         loginCooldownUntil.delete(id);
         patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: list, loginError: null });
       } catch (e) {
-        if (e instanceof LMSError && !e.retryable) {
-          loginCooldownUntil.set(id, Date.now() + 10 * 60_000);
-          patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: errMsg(e) });
-          return;
-        }
+        if (handleNonRetryableLogin(id, e)) return;
         try {
           const list = await attempt();
           loginCooldownUntil.delete(id);
           patchRuntime(id, { isLoggedIn: true, isLoggingIn: false, rollcalls: list, loginError: null });
         } catch (e2) {
-          if (e2 instanceof LMSError && !e2.retryable) {
-            loginCooldownUntil.set(id, Date.now() + 10 * 60_000);
-          }
+          handleNonRetryableLogin(id, e2);
           patchRuntime(id, { isLoggedIn: false, isLoggingIn: false, loginError: errMsg(e2) });
         }
       }
@@ -315,11 +350,13 @@ export const useAppState = create<AppState>((set, get) => {
       }
 
       const cfg = useConfig.getState();
-      const timeout = Math.min(cfg.requestTimeoutMs, 5000);
+      const timeout = cfg.requestTimeoutMs;
+      const waitMs = Math.max(timeout + 1000, 6000);
       let accounts = enabledAccounts(cfg);
       if (accountIds) accounts = accounts.filter(a => accountIds.includes(a.id));
+      result.accountIds = accountIds;
 
-      type QRBucket = Exclude<keyof BatchCheckinResult, 'message'>;
+      type QRBucket = Exclude<keyof BatchCheckinResult, 'message' | 'accountIds'>;
       type QRAccountResult = { bucket: QRBucket; entry: ScanEntry };
       const completed = new Map<string, QRAccountResult>();
 
@@ -355,14 +392,22 @@ export const useAppState = create<AppState>((set, get) => {
           }
         }
         if (signedAny) void get().refreshAccount(acc.id);
-        completed.set(acc.id, signedAny
-          ? { bucket: 'newlySigned', entry }
-          : { bucket: 'failed', entry: { ...entry, error: firstError ?? '签到超时' } });
+        if (signedAny) {
+          completed.set(acc.id, { bucket: 'newlySigned', entry });
+          if (firstError) {
+            completed.set(`${acc.id}:failed`, {
+              bucket: 'failed',
+              entry: { ...entry, error: firstError },
+            });
+          }
+        } else {
+          completed.set(acc.id, { bucket: 'failed', entry: { ...entry, error: firstError ?? '签到超时' } });
+        }
       })());
 
       await Promise.race([
         Promise.allSettled(perAccount),
-        wait(6000),
+        wait(waitMs),
       ]);
 
       for (const acc of accounts) {
@@ -371,6 +416,8 @@ export const useAppState = create<AppState>((set, get) => {
           entry: { accountId: acc.id, displayName: acc.displayName, error: '签到超时' },
         };
         result[item.bucket].push(item.entry);
+        const partialFailure = completed.get(`${acc.id}:failed`);
+        if (partialFailure) result.failed.push(partialFailure.entry);
       }
 
       const n = result.newlySigned.length;
@@ -417,16 +464,19 @@ export const useAppState = create<AppState>((set, get) => {
           }
           entry.courseTitle = absent[0]!.course_title;
           let firstError: string | null = null;
+          let signedAny = false;
           for (const task of absent) {
             try {
               await clientFor(acc.id).doCheckin(task.rollcall_id, 'number', { numberCode: code }, acc.clientID, timeout);
               markSigned(acc.id, task.rollcall_id);
+              signedAny = true;
             } catch (e) {
               if (!firstError) firstError = errMsg(e);
             }
           }
+          if (signedAny) result.newlySigned.push(entry);
           if (firstError) result.failed.push({ ...entry, error: firstError });
-          else result.newlySigned.push(entry);
+          if (!signedAny && !firstError) result.failed.push({ ...entry, error: '签到失败' });
           void get().refreshAccount(acc.id);
         }),
       );
@@ -491,7 +541,8 @@ export const useAppState = create<AppState>((set, get) => {
             }
           }
           if (signedAny) result.newlySigned.push(entry);
-          else result.failed.push({ ...entry, error: firstError ?? '签到失败' });
+          if (firstError) result.failed.push({ ...entry, error: firstError });
+          if (!signedAny && !firstError) result.failed.push({ ...entry, error: '签到失败' });
           void get().refreshAccount(acc.id);
         }),
       );
@@ -557,7 +608,8 @@ export const useAppState = create<AppState>((set, get) => {
         }
       }
       if (signedAny) result.newlySigned.push(entry);
-      else result.failed.push({ ...entry, error: firstError ?? '签到失败' });
+      if (firstError) result.failed.push({ ...entry, error: firstError });
+      if (!signedAny && !firstError) result.failed.push({ ...entry, error: '签到失败' });
       void get().refreshAccount(id);
 
       get().setCheckinMessage(signedAny ? `定位签到成功 (${acc.displayName})` : '定位签到失败');
@@ -646,7 +698,9 @@ export const useAppState = create<AppState>((set, get) => {
       for (const client of clients.values()) client.clearSession();
       clients.clear();
       loginCooldownUntil.clear();
+      for (const id of accountCredentialKeys.keys()) storage.delete(credentialStorageKey(id));
       accountCredentialKeys.clear();
+      accountCredentialKeysLoaded.clear();
       if (toastTimer) {
         clearTimeout(toastTimer);
         toastTimer = null;

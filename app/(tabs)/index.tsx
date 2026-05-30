@@ -47,7 +47,6 @@ export default function DashboardScreen() {
   const runtimes = useAppState(s => s.runtimes);
   const checkinMessage = useAppState(s => s.checkinMessage);
   const lastScanResult = useAppState(s => s.lastScanResult);
-  const servicesStarted = useAppState(s => s.servicesStarted);
   const loginAccount = useAppState(s => s.loginAccount);
   const loginAllEnabled = useAppState(s => s.loginAllEnabled);
   const refreshAllEnabled = useAppState(s => s.refreshAllEnabled);
@@ -75,9 +74,7 @@ export default function DashboardScreen() {
       lastPollTime: null,
     };
 
-  const enabled = accounts.filter(a => a.enabled);
-  const loggedInCount = enabled.filter(a => rtFor(a.id).isLoggedIn).length;
-  const errorCount = enabled.filter(a => !!rtFor(a.id).loginError).length;
+  const enabledCount = accounts.filter(a => a.enabled).length;
 
   // Any enabled + logged-in account with an outstanding number task?
   const hasNumberTask = accounts.some(a => {
@@ -149,10 +146,7 @@ export default function DashboardScreen() {
     <SafeAreaView style={styles.safe} edges={['top']}>
       <View style={styles.headerRow}>
         <Text style={styles.title}>签到</Text>
-        <Text style={styles.subtitle}>
-          已启用 {enabled.length}/{accounts.length} · 已登录 {loggedInCount}
-          {errorCount ? ` · 异常 ${errorCount}` : ''} · {servicesStarted ? '轮询已启动' : '轮询未启动'}
-        </Text>
+        <Text style={styles.subtitle}>已启用 {enabledCount}/{accounts.length}</Text>
       </View>
 
       <ScrollView
@@ -263,8 +257,13 @@ export default function DashboardScreen() {
         result={lastScanResult}
         onClose={clearScanResult}
         onScanAgain={() => {
+          const accountIds = lastScanResult?.accountIds;
           clearScanResult();
-          router.push('/scanner');
+          if (accountIds?.length === 1) {
+            router.push({ pathname: '/scanner', params: { account: accountIds[0] } });
+          } else {
+            router.push('/scanner');
+          }
         }}
       />
     </SafeAreaView>
