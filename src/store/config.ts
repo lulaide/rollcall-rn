@@ -3,6 +3,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { zustandStorage } from './storage';
+import { deleteSessionCookies } from '../services/sessionStore';
 
 export interface AccountConfig {
   id: string; // stable accountId
@@ -38,7 +39,7 @@ export interface ConfigState {
     password: string;
     studentID?: string;
     enabled?: boolean;
-  }) => string;
+  }) => string | null;
   updateAccount: (id: string, patch: Partial<Omit<AccountConfig, 'id'>>) => void;
   removeAccount: (id: string) => void;
   setEnabled: (id: string, enabled: boolean) => void;
@@ -59,6 +60,7 @@ export interface ConfigState {
     added: number;
     updated: number;
     skipped: number;
+    overLimit: number;
   };
   clearAll: () => void;
 }
@@ -91,6 +93,7 @@ export const useConfig = create<ConfigState>()(
       requestTimeoutMs: 8000,
 
       addAccount({ displayName, username, password, studentID, enabled }) {
+        if (get().accounts.length >= MAX_ACCOUNTS) return null;
         const id = uuidLower();
         const account: AccountConfig = {
           id,
@@ -112,6 +115,7 @@ export const useConfig = create<ConfigState>()(
       },
 
       removeAccount(id) {
+        deleteSessionCookies(id);
         set({ accounts: get().accounts.filter(a => a.id !== id) });
       },
 
@@ -150,6 +154,7 @@ export const useConfig = create<ConfigState>()(
         let added = 0;
         let updated = 0;
         let skipped = 0;
+        let overLimit = 0;
 
         for (const raw of incoming) {
           const studentID = (raw.studentID ?? '').trim();
@@ -171,6 +176,10 @@ export const useConfig = create<ConfigState>()(
             };
             updated++;
           } else {
+            if (accounts.length >= MAX_ACCOUNTS) {
+              overLimit++;
+              continue;
+            }
             const account: AccountConfig = {
               id: uuidLower(),
               displayName: raw.displayName?.trim() || username || studentID,
@@ -187,10 +196,11 @@ export const useConfig = create<ConfigState>()(
         }
 
         set({ accounts });
-        return { added, updated, skipped };
+        return { added, updated, skipped, overLimit };
       },
 
       clearAll() {
+        for (const account of get().accounts) deleteSessionCookies(account.id);
         set({ accounts: [] });
       },
     }),

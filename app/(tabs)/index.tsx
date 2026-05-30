@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   Modal,
   Pressable,
+  RefreshControl,
   ScrollView,
   StyleSheet,
   Text,
@@ -46,7 +47,10 @@ export default function DashboardScreen() {
   const runtimes = useAppState(s => s.runtimes);
   const checkinMessage = useAppState(s => s.checkinMessage);
   const lastScanResult = useAppState(s => s.lastScanResult);
+  const servicesStarted = useAppState(s => s.servicesStarted);
   const loginAccount = useAppState(s => s.loginAccount);
+  const loginAllEnabled = useAppState(s => s.loginAllEnabled);
+  const refreshAllEnabled = useAppState(s => s.refreshAllEnabled);
   const batchCheckinNumber = useAppState(s => s.batchCheckinNumber);
   const numberCheckinAll = useAppState(s => s.numberCheckinAll);
   const radarCheckinAccount = useAppState(s => s.radarCheckinAccount);
@@ -54,6 +58,7 @@ export default function DashboardScreen() {
 
   const tabBarHeight = useBottomTabBarHeight();
   const [numberCode, setNumberCode] = React.useState('');
+  const [refreshing, setRefreshing] = React.useState(false);
   const [submittingNumber, setSubmittingNumber] = React.useState(false);
   const [batchNumberBusy, setBatchNumberBusy] = React.useState(false);
   const [busyAccount, setBusyAccount] = React.useState<string | null>(null);
@@ -70,6 +75,10 @@ export default function DashboardScreen() {
       lastPollTime: null,
     };
 
+  const enabled = accounts.filter(a => a.enabled);
+  const loggedInCount = enabled.filter(a => rtFor(a.id).isLoggedIn).length;
+  const errorCount = enabled.filter(a => !!rtFor(a.id).loginError).length;
+
   // Any enabled + logged-in account with an outstanding number task?
   const hasNumberTask = accounts.some(a => {
     if (!a.enabled) return false;
@@ -78,6 +87,17 @@ export default function DashboardScreen() {
   });
 
   const onScan = () => router.push('/scanner');
+
+  const onRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await loginAllEnabled();
+      await refreshAllEnabled();
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const submitNumber = async () => {
     const code = numberCode.trim();
@@ -130,11 +150,23 @@ export default function DashboardScreen() {
       <View style={styles.headerRow}>
         <Text style={styles.title}>签到</Text>
         <Text style={styles.subtitle}>
-          已启用 {accounts.filter(a => a.enabled).length}/{accounts.length}
+          已启用 {enabled.length}/{accounts.length} · 已登录 {loggedInCount}
+          {errorCount ? ` · 异常 ${errorCount}` : ''} · {servicesStarted ? '轮询已启动' : '轮询未启动'}
         </Text>
       </View>
 
-      <ScrollView contentContainerStyle={styles.listContent}>
+      <ScrollView
+        contentContainerStyle={[styles.listContent, { paddingBottom: tabBarHeight + 88 }]}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void onRefresh()}
+            tintColor="#fff"
+            colors={["#3478f6"]}
+            progressBackgroundColor="#1c1c1e"
+          />
+        }
+      >
         {accounts.length === 0 ? (
           <View style={styles.empty}>
             <IconSymbol name="person.crop.circle.badge.plus" size={48} color="rgba(235,235,245,0.4)" />
@@ -365,6 +397,9 @@ function ResultSheet({
           <Text style={styles.sheetTitle}>签到结果</Text>
           {result && (
             <ScrollView style={{ maxHeight: 360 }}>
+              {isEmptyResult(result) && (
+                <Text style={styles.sheetEmpty}>{result.message ?? '没有可处理的账号'}</Text>
+              )}
               <Bucket title="本次新签" color="#34d399" entries={result.newlySigned} />
               <Bucket title="本次失败" color="#ff453a" entries={result.failed} showError />
               <Bucket title="已签跳过" color="rgba(235,235,245,0.6)" entries={result.alreadySigned} />
@@ -384,6 +419,15 @@ function ResultSheet({
         </GlassCard>
       </View>
     </Modal>
+  );
+}
+
+function isEmptyResult(result: BatchCheckinResult): boolean {
+  return (
+    result.newlySigned.length === 0 &&
+    result.failed.length === 0 &&
+    result.alreadySigned.length === 0 &&
+    result.noTask.length === 0
   );
 }
 
@@ -437,7 +481,7 @@ const styles = StyleSheet.create({
   title: { color: '#fff', fontSize: 32, fontWeight: '700' },
   subtitle: { color: 'rgba(235,235,245,0.5)', fontSize: 14 },
 
-  listContent: { paddingHorizontal: 20, paddingBottom: 140 },
+  listContent: { paddingHorizontal: 20 },
 
   empty: { alignItems: 'center', gap: 8, paddingTop: 80 },
   emptyTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
@@ -529,6 +573,7 @@ const styles = StyleSheet.create({
   sheetBackdrop: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
   sheet: { margin: 12, padding: 20, backgroundColor: '#1c1c1e' },
   sheetTitle: { color: '#fff', fontSize: 18, fontWeight: '700', marginBottom: 8 },
+  sheetEmpty: { color: 'rgba(235,235,245,0.7)', fontSize: 14, marginTop: 8, lineHeight: 20 },
   sheetActions: { flexDirection: 'row', gap: 10, marginTop: 14 },
   sheetBtn: { flex: 1, paddingVertical: 13, borderRadius: 12, alignItems: 'center' },
   sheetBtnSecondary: { backgroundColor: 'rgba(120,120,128,0.4)' },

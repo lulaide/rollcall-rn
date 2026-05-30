@@ -11,6 +11,7 @@
 
 import { encryptPassword } from './crypto';
 import { CookieJar } from './cookieJar';
+import { loadSessionCookies, saveSessionCookies } from './sessionStore';
 import type { Rollcall, RollcallsResponse } from '../models/rollcall';
 
 const LMS_BASE = 'http://lms.tc.cqupt.edu.cn';
@@ -26,7 +27,11 @@ export interface StudentRollcallsDetail {
 }
 
 export class LMSError extends Error {
-  constructor(message: string, public kind: 'login' | 'session' | 'checkin' | 'network') {
+  constructor(
+    message: string,
+    public kind: 'login' | 'session' | 'checkin' | 'network',
+    public retryable = true,
+  ) {
     super(message);
     this.name = 'LMSError';
   }
@@ -35,16 +40,32 @@ export class LMSError extends Error {
 export class LMSClient {
   private jar = new CookieJar();
 
+  constructor(private accountId?: string) {
+    if (accountId) this.jar.load(loadSessionCookies(accountId));
+  }
+
   // ------------ Public API ------------
 
-  async login(username: string, password: string): Promise<void> {
+  clearSession(): void {
     this.jar.clear();
+    this.persistCookies();
+  }
 
-    // Step 1: follow LMS → IDS redirect (no auto-follow, do it manually)
-    const callbackURL = await this.getCallbackURL();
+  async getRollcallsIfSessionValid(): Promise<Rollcall[] | null> {
+    const res = await this.rawFetch(`${LMS_BASE}/api/radar/rollcalls?api_version=1.1.0`, {
+      redirect: 'manual',
+    });
+    if (res.status !== 200) return null;
+    const json = (await res.json()) as RollcallsResponse;
+    return json.rollcalls ?? [];
+  }
 
-    // Step 2: GET login page, parse salt + execution
-    const loginURL = `${IDS_BASE}/authserver/login?service=${encodeURIComponent(callbackURL)}`;
+  async login(username: string, password: string): Promise<void> {
+    this.clearSession();
+
+    // Step 1/2: use the exact IDS login URL returned by LMS. Rebuilding it can
+    // double-wrap the service parameter and make CAS callback flaky.
+    const loginURL = await this.getLoginURL();
     const { salt, execution } = await this.getLoginPageParams(loginURL);
     if (!execution) throw new LMSError('无法获取 execution token', 'login');
 
@@ -70,7 +91,8 @@ export class LMSClient {
 
     let redirectURL: string | null = null;
     if (res.status === 302) {
-      redirectURL = res.headers.get('Location');
+      const loc = res.headers.get('Location');
+      redirectURL = loc ? absolutize(loc, loginURL) : null;
     } else if (res.status === 200) {
       const body = await res.text();
       if (body.includes('踢出会话') || body.includes('kickout')) {
@@ -86,23 +108,28 @@ export class LMSClient {
             body: formBody2,
             redirect: 'manual',
           });
-          if (res2.status === 302) redirectURL = res2.headers.get('Location');
+          if (res2.status === 302) {
+            const loc = res2.headers.get('Location');
+            redirectURL = loc ? absolutize(loc, loginURL) : null;
+          } else if (res2.status === 200) {
+            const body2 = await res2.text();
+            const blockingError = classifyLoginBlock(body2);
+            if (blockingError) throw new LMSError(blockingError, 'login', false);
+          }
         }
+      } else {
+        const blockingError = classifyLoginBlock(body);
+        if (blockingError) throw new LMSError(blockingError, 'login', false);
       }
     }
 
-    // Step 4: follow redirect (auto-follow this one to get session cookie set)
+    // Step 4: manually follow every callback hop so we can collect Set-Cookie from
+    // intermediate 30x responses on platforms where fetch auto-follow hides them.
     if (redirectURL) {
-      try {
-        await this.rawFetch(redirectURL, { method: 'GET', redirect: 'follow' });
-      } catch {
-        // ignore — we just need the cookies
-      }
+      await this.followRedirects(redirectURL);
     }
 
-    if (!this.jar.has('session', LMS_BASE)) {
-      throw new LMSError('未获取到 session cookie', 'login');
-    }
+    await this.assertSessionReady();
   }
 
   async getRollcalls(reLoginIfNeeded: () => Promise<void>): Promise<Rollcall[]> {
@@ -225,6 +252,7 @@ export class LMSClient {
       const sc = collectSetCookie(res);
       if (sc.length > 0) {
         this.jar.ingest(sc, u.host);
+        this.persistCookies();
       }
       return res;
     } finally {
@@ -232,21 +260,50 @@ export class LMSClient {
     }
   }
 
-  private async getCallbackURL(): Promise<string> {
+  private async getLoginURL(): Promise<string> {
     let currentURL = `${LMS_BASE}/login`;
-    for (let i = 0; i < 2; i++) {
+    for (let i = 0; i < 5; i++) {
       const res = await this.rawFetch(currentURL, { redirect: 'manual' });
       if (res.status < 300 || res.status >= 400) break;
       const loc = res.headers.get('Location');
       if (!loc) break;
       currentURL = absolutize(loc, currentURL);
+      if (currentURL.includes('/authserver/login')) break;
     }
     return currentURL;
+  }
+
+  private async followRedirects(url: string): Promise<Response | null> {
+    let currentURL = url;
+    let last: Response | null = null;
+    for (let i = 0; i < 8; i++) {
+      const res = await this.rawFetch(currentURL, { method: 'GET', redirect: 'manual' });
+      last = res;
+      if (res.status < 300 || res.status >= 400) return res;
+      const loc = res.headers.get('Location');
+      if (!loc) return res;
+      currentURL = absolutize(loc, currentURL);
+    }
+    return last;
+  }
+
+  private persistCookies(): void {
+    if (this.accountId) saveSessionCookies(this.accountId, this.jar.toJSON());
+  }
+
+  private async assertSessionReady(): Promise<void> {
+    const res = await this.rawFetch(`${LMS_BASE}/api/radar/rollcalls?api_version=1.1.0`, {
+      redirect: 'manual',
+    });
+    if (res.status === 200) return;
+    throw new LMSError(`登录会话验证失败 (${res.status})`, 'login');
   }
 
   private async getLoginPageParams(loginURL: string): Promise<{ salt: string; execution: string }> {
     const res = await this.rawFetch(loginURL);
     const html = await res.text();
+    const blockingError = classifyLoginBlock(html);
+    if (blockingError) throw new LMSError(blockingError, 'login', false);
     return {
       salt: extractValueByID(html, 'pwdEncryptSalt') ?? '',
       execution: extractExecution(html) ?? '',
@@ -290,6 +347,31 @@ function absolutize(loc: string, base: string): string {
   }
 }
 
+function classifyLoginBlock(html: string): string | null {
+  const text = stripHtml(html).replace(/\s+/g, ' ');
+  if (/验证码|captcha|请输入验证码|图形码/i.test(text)) {
+    return '统一认证需要图形验证码，请等待或用浏览器完成验证后再试';
+  }
+  if (/锁定|封禁|冻结|限制|10\s*分钟|十分钟|稍后再试|过于频繁/i.test(text)) {
+    return '统一认证已限制登录，请等待 10 分钟后再试';
+  }
+  if (/密码错误|账号或密码错误|用户名或密码错误|认证失败|登录失败|密码有误/i.test(text)) {
+    return '账号或密码错误，请先检查账号密码，已停止自动重试';
+  }
+  return null;
+}
+
+function stripHtml(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
 function collectSetCookie(res: Response): string[] {
   // RN's fetch returns Set-Cookie joined by comma in some platforms — comma is
   // also valid inside Expires=Thu, 01 Jan ... So splitting on comma is unsafe.
@@ -309,10 +391,17 @@ function collectSetCookie(res: Response): string[] {
   // 2. raw header (RN sometimes returns array)
   const single = res.headers.get('set-cookie');
   if (typeof single === 'string' && single.length > 0) {
-    out.push(single);
+    out.push(...splitSetCookieHeader(single));
   }
 
   return out;
+}
+
+function splitSetCookieHeader(header: string): string[] {
+  return header
+    .split(/,(?=\s*[^;,=\s]+=)/g)
+    .map(s => s.trim())
+    .filter(Boolean);
 }
 
 function extractValueByID(html: string, id: string): string | null {

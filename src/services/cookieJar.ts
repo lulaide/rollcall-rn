@@ -73,6 +73,26 @@ export class CookieJar {
     this.store.clear();
   }
 
+  toJSON(): ParsedCookie[] {
+    const out: ParsedCookie[] = [];
+    for (const bag of this.store.values()) out.push(...bag.values());
+    return out;
+  }
+
+  load(cookies: ParsedCookie[]) {
+    this.store.clear();
+    for (const cookie of cookies) {
+      if (!cookie.name || !cookie.domain) continue;
+      const suffix = registrableSuffix(cookie.domain);
+      let bag = this.store.get(suffix);
+      if (!bag) {
+        bag = new Map();
+        this.store.set(suffix, bag);
+      }
+      bag.set(cookie.name, { ...cookie, path: cookie.path || '/' });
+    }
+  }
+
   /** For debugging */
   dump(): Record<string, string[]> {
     const out: Record<string, string[]> = {};

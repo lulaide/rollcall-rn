@@ -9,19 +9,33 @@ const OUT = path.join(__dirname, '..', 'assets', 'images');
 const BG = '#000000';
 const CLOUD = '#FFFFFF';
 
-// Flat, symmetric cloud silhouette in a 1024x1024 coordinate space, centered.
-// Composed of overlapping shapes sharing one fill so they merge seamlessly.
+// Geometric cloud with a lightning-bolt cutout in a 1024x1024 coordinate space.
+// The single compound path keeps the logo flat/vector-clean and uses even-odd
+// fill to carve the bolt as black negative space through the white cloud.
 function cloud({ fill = CLOUD } = {}) {
-  // Three humps + a bridging body. The side circles' bottom points coincide
-  // with the body's bottom corners, so the cloud has a clean flat baseline
-  // with rounded lower corners and no protruding "feet".
   return `
-    <g fill="${fill}">
-      <rect x="320" y="546" width="384" height="176"/>
-      <circle cx="320" cy="582" r="140"/>
-      <circle cx="512" cy="512" r="210"/>
-      <circle cx="704" cy="582" r="140"/>
-    </g>`;
+    <path
+      fill="${fill}"
+      fill-rule="evenodd"
+      clip-rule="evenodd"
+      d="
+        M312 724
+        C211 724 130 646 130 550
+        C130 458 204 384 296 380
+        C333 299 415 244 512 244
+        C629 244 725 323 751 430
+        C831 443 894 508 894 588
+        C894 663 832 724 756 724
+        H312
+        Z
+        M548 382
+        L414 578
+        H522
+        L478 720
+        L634 514
+        H526
+        L548 382
+        Z"/>`;
 }
 
 function svg(inner) {

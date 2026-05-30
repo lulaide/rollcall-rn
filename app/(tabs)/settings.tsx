@@ -1,16 +1,12 @@
 import * as React from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, Switch, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
-
-import { GlassCard, liquidGlassAvailable } from '@/src/components/Glass';
+import { GlassCard } from '@/src/components/Glass';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useAppState } from '@/src/store/appState';
 import { useConfig } from '@/src/store/config';
 
 export default function SettingsScreen() {
-  const router = useRouter();
-  const accounts = useConfig(s => s.accounts);
   const autoLocationCheckin = useConfig(s => s.autoLocationCheckin);
   const autoNumberCheckin = useConfig(s => s.autoNumberCheckin);
   const curriculumPreMinutes = useConfig(s => s.curriculumPreMinutes);
@@ -18,9 +14,7 @@ export default function SettingsScreen() {
   const setGlobal = useConfig(s => s.setGlobal);
   const clearAll = useConfig(s => s.clearAll);
 
-  const logoutAccount = useAppState(s => s.logoutAccount);
-
-  const enabledCount = accounts.filter(a => a.enabled).length;
+  const clearAllRuntime = useAppState(s => s.clearAllRuntime);
 
   const onClearAll = () => {
     Alert.alert('清除全部数据', '将删除所有账号及其会话、签到数据，且不可恢复。', [
@@ -29,7 +23,7 @@ export default function SettingsScreen() {
         text: '全部清除',
         style: 'destructive',
         onPress: () => {
-          for (const a of accounts) logoutAccount(a.id);
+          clearAllRuntime();
           clearAll();
         },
       },
@@ -43,16 +37,6 @@ export default function SettingsScreen() {
       </View>
 
       <ScrollView contentContainerStyle={styles.content}>
-        <SectionLabel>账号</SectionLabel>
-        <GlassCard borderRadius={14} style={{ padding: 0 }}>
-          <Pressable onPress={() => router.push('/(tabs)/accounts')} style={styles.rowItem}>
-            <Text style={styles.label}>账号管理</Text>
-            <View style={{ flex: 1 }} />
-            <Text style={styles.value}>已启用 {enabledCount}/{accounts.length}</Text>
-            <IconSymbol name="chevron.right" size={16} color="rgba(235,235,245,0.4)" />
-          </Pressable>
-        </GlassCard>
-
         <SectionLabel>签到设置</SectionLabel>
         <GlassCard borderRadius={14} style={{ padding: 0 }}>
           <Row
@@ -94,11 +78,6 @@ export default function SettingsScreen() {
             unit="秒"
             onChange={v => setGlobal({ requestTimeoutMs: v * 1000 })}
           />
-        </GlassCard>
-
-        <SectionLabel>关于</SectionLabel>
-        <GlassCard borderRadius={14} style={{ padding: 0 }}>
-          <Row label="iOS 26 Liquid Glass" value={liquidGlassAvailable ? '已启用' : '降级模式'} />
         </GlassCard>
 
         <Pressable

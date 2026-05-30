@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { Alert, Pressable, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import { AccountForm, type AccountFormValues } from '@/src/components/AccountForm';
 import { useAppState } from '@/src/store/appState';
-import { useConfig } from '@/src/store/config';
+import { MAX_ACCOUNTS, useConfig } from '@/src/store/config';
 
 export default function AccountEditScreen() {
   const router = useRouter();
@@ -16,6 +16,7 @@ export default function AccountEditScreen() {
   const addAccount = useConfig(s => s.addAccount);
   const updateAccount = useConfig(s => s.updateAccount);
   const loginAccount = useAppState(s => s.loginAccount);
+  const startServices = useAppState(s => s.startServices);
 
   const [busy, setBusy] = React.useState(false);
 
@@ -33,6 +34,7 @@ export default function AccountEditScreen() {
         // Only overwrite the password when a new one was entered.
         if (v.password) (patch as { password: string }).password = v.password;
         updateAccount(account.id, patch);
+        startServices();
         await loginAccount(account.id);
       } else {
         const newId = addAccount({
@@ -41,6 +43,11 @@ export default function AccountEditScreen() {
           password: v.password,
           studentID: v.studentID,
         });
+        if (!newId) {
+          Alert.alert('已达上限', `最多 ${MAX_ACCOUNTS} 个账号`);
+          return;
+        }
+        startServices();
         await loginAccount(newId);
       }
       router.back();

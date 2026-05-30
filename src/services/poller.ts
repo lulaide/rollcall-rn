@@ -48,6 +48,8 @@ interface CurriculumCacheEntry {
 export class MultiAccountPoller {
   private timer: ReturnType<typeof setInterval> | null = null;
   private curricula = new Map<string, CurriculumCacheEntry>();
+  private inFlight = false;
+  private rerunRequested = false;
 
   constructor(
     private source: MultiPollerSource,
@@ -55,6 +57,10 @@ export class MultiAccountPoller {
   ) {}
 
   start(): void {
+    if (this.timer) {
+      this.triggerPoll();
+      return;
+    }
     void this.poll();
     this.timer = setInterval(() => { void this.poll(); }, 30_000);
   }
@@ -69,40 +75,56 @@ export class MultiAccountPoller {
   // ------------ Internals ------------
 
   private async poll(): Promise<void> {
-    const accounts = this.source.listAccounts();
-    const env = this.source.env();
+    if (this.inFlight) {
+      this.rerunRequested = true;
+      return;
+    }
 
-    await Promise.allSettled(
-      accounts.map(async acc => {
-        await this.fetchCurriculumIfNeeded(acc.studentID);
+    this.inFlight = true;
+    try {
+      const accounts = this.source.listAccounts();
+      const env = this.source.env();
 
-        // Always surface today's courses (the curriculum tab needs them even
-        // outside the polling window and for not-yet-logged-in accounts).
-        this.emitTodayCourses(acc.id, acc.studentID);
+      await Promise.allSettled(
+        accounts.map(async acc => {
+          await this.fetchCurriculumIfNeeded(acc.studentID);
 
-        // Rollcall discovery + auto check-in only run for logged-in accounts
-        // inside their own curriculum window.
-        if (!acc.isLoggedIn) return;
-        if (!this.shouldPoll(acc.studentID, env.curriculumPreMinutes)) return;
+          // Always surface today's courses (the curriculum tab needs them even
+          // outside the polling window and for not-yet-logged-in accounts).
+          this.emitTodayCourses(acc.id, acc.studentID);
 
-        this.hooks.emitPolling(acc.id, true, Date.now());
-        try {
-          await this.hooks.refreshAccount(acc.id);
-        } catch {}
-        this.hooks.emitPolling(acc.id, false, Date.now());
+          // Rollcall discovery + auto check-in only run for logged-in accounts
+          // inside their own curriculum window.
+          if (!acc.isLoggedIn) return;
+          if (!this.shouldPoll(acc.studentID, env.curriculumPreMinutes)) return;
 
-        if (env.autoNumberCheckin) {
-          try { await this.hooks.processNumberTasks(acc.id); } catch {}
-        }
-
-        if (env.autoLocationCheckin) {
-          const inst = this.findCurrentCourse(acc.studentID);
-          if (inst) {
-            try { await this.hooks.autoLocationCheckin(acc.id, inst); } catch {}
+          this.hooks.emitPolling(acc.id, true, Date.now());
+          try {
+            await this.hooks.refreshAccount(acc.id);
+          } catch {
+          } finally {
+            this.hooks.emitPolling(acc.id, false, Date.now());
           }
-        }
-      }),
-    );
+
+          if (env.autoNumberCheckin) {
+            try { await this.hooks.processNumberTasks(acc.id); } catch {}
+          }
+
+          if (env.autoLocationCheckin) {
+            const inst = this.findCurrentCourse(acc.studentID);
+            if (inst) {
+              try { await this.hooks.autoLocationCheckin(acc.id, inst); } catch {}
+            }
+          }
+        }),
+      );
+    } finally {
+      this.inFlight = false;
+      if (this.rerunRequested && this.timer) {
+        this.rerunRequested = false;
+        void this.poll();
+      }
+    }
   }
 
   private shouldPoll(studentID: string, preMinutes: number): boolean {

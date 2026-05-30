@@ -67,6 +67,8 @@ export default function AccountsScreen() {
   const loginAccount = useAppState(s => s.loginAccount);
   const logoutAccount = useAppState(s => s.logoutAccount);
   const startServices = useAppState(s => s.startServices);
+  const syncRuntimes = useAppState(s => s.syncRuntimes);
+  const clearAllRuntime = useAppState(s => s.clearAllRuntime);
 
   const [menuVisible, setMenuVisible] = React.useState(false);
 
@@ -89,6 +91,7 @@ export default function AccountsScreen() {
         onPress: () => {
           logoutAccount(acc.id);
           removeAccount(acc.id);
+          syncRuntimes();
         },
       },
     ]);
@@ -122,9 +125,13 @@ export default function AccountsScreen() {
       Alert.alert('解析失败', '剪贴板内容不是有效的账号数据');
       return;
     }
-    const { added, updated, skipped } = importAccounts(incoming);
+    const { added, updated, skipped, overLimit } = importAccounts(incoming);
+    startServices();
     void useAppState.getState().loginAllEnabled().finally(() => startServices());
-    Alert.alert('导入完成', `新增 ${added} · 更新 ${updated} · 跳过 ${skipped}`);
+    const parts = [`新增 ${added}`, `更新 ${updated}`];
+    if (skipped) parts.push(`无效 ${skipped}`);
+    if (overLimit) parts.push(`超限 ${overLimit}`);
+    Alert.alert('导入完成', parts.join(' · '));
   };
 
   const onClearAll = () => {
@@ -135,7 +142,7 @@ export default function AccountsScreen() {
         text: '全部清除',
         style: 'destructive',
         onPress: () => {
-          for (const a of accounts) logoutAccount(a.id);
+          clearAllRuntime();
           clearAll();
         },
       },

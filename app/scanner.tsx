@@ -21,6 +21,7 @@ export default function ScannerScreen() {
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
   const [scannerSupported, setScannerSupported] = React.useState(Platform.OS === 'android');
   const [submitting, setSubmitting] = React.useState(false);
+  const [zoomed, setZoomed] = React.useState(false);
   const [manualVisible, setManualVisible] = React.useState(false);
   const [manualValue, setManualValue] = React.useState('');
   const scanLockedRef = React.useRef(false);
@@ -99,6 +100,7 @@ export default function ScannerScreen() {
           facing="back"
           onBarcodeScanned={submitting ? undefined : event => void handleScannedValue(event.data)}
           style={StyleSheet.absoluteFill}
+          zoom={zoomed ? 0.35 : 0}
         />
       );
     }
@@ -133,6 +135,15 @@ export default function ScannerScreen() {
           </View>
         </GlassCard>
       </SafeAreaView>
+
+      {Platform.OS === 'android' && (
+        <Pressable
+          onPress={() => setZoomed(v => !v)}
+          style={({ pressed }) => [styles.zoomButton, pressed && { opacity: 0.8 }]}
+        >
+          <Text style={styles.zoomButtonText}>{zoomed ? '2x' : '1x'}</Text>
+        </Pressable>
+      )}
 
       {submitting && (
         <View style={styles.submittingOverlay}>
@@ -223,6 +234,21 @@ const styles = StyleSheet.create({
   },
   topBtn: { color: '#fff', fontSize: 15 },
   topTitle: { color: '#fff', fontSize: 16, fontWeight: '600' },
+
+  zoomButton: {
+    position: 'absolute',
+    right: 22,
+    bottom: 42,
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.62)',
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.28)',
+  },
+  zoomButtonText: { color: '#fff', fontSize: 16, fontWeight: '700' },
 
   submittingOverlay: {
     ...StyleSheet.absoluteFillObject,

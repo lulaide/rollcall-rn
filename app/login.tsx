@@ -1,11 +1,11 @@
 import * as React from 'react';
-import { StyleSheet, Text, View } from 'react-native';
+import { Alert, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 
 import { AccountForm, type AccountFormValues } from '@/src/components/AccountForm';
 import { IconSymbol } from '@/components/ui/icon-symbol';
 import { useAppState } from '@/src/store/appState';
-import { useConfig } from '@/src/store/config';
+import { MAX_ACCOUNTS, useConfig } from '@/src/store/config';
 
 export default function LoginScreen() {
   const addAccount = useConfig(s => s.addAccount);
@@ -22,6 +22,11 @@ export default function LoginScreen() {
       password: v.password,
       studentID: v.studentID,
     });
+    if (!id) {
+      Alert.alert('已达上限', `最多 ${MAX_ACCOUNTS} 个账号`);
+      setBusy(false);
+      return;
+    }
     try {
       await loginAccount(id);
     } finally {

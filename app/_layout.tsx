@@ -8,33 +8,51 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import 'react-native-reanimated';
 
 import { useAppState } from '@/src/store/appState';
-import { useConfig, hasAnyAccount } from '@/src/store/config';
+import { useConfig, enabledAccounts } from '@/src/store/config';
 
 void SplashScreen.preventAutoHideAsync();
 
 export default function RootLayout() {
-  const hasAccount = useConfig(hasAnyAccount);
   const loginAllEnabled = useAppState(s => s.loginAllEnabled);
   const startServices = useAppState(s => s.startServices);
 
   const [ready, setReady] = React.useState(false);
 
-  // First boot: log in every enabled account + start the poller, while a short
-  // "hello" transition covers the launch. No login gate — we always land on the
-  // tabs; adding accounts happens from the 账号 tab.
-  const bootstrappedRef = React.useRef(false);
+  // First boot: wait for persisted accounts to hydrate, then start the poller
+  // even when the app is empty. No login gate — adding accounts happens from the
+  // 账号 tab, and the idempotent service layer will pick them up later.
   React.useEffect(() => {
-    if (bootstrappedRef.current) return;
-    bootstrappedRef.current = true;
+    let cancelled = false;
+    let readyTimer: ReturnType<typeof setTimeout> | null = null;
 
-    void SplashScreen.hideAsync().catch(() => {});
-    if (hasAccount) {
-      void loginAllEnabled().finally(() => startServices());
+    const finishBoot = () => {
+      if (cancelled) return;
+      void SplashScreen.hideAsync().catch(() => {});
+      startServices();
+      if (enabledAccounts(useConfig.getState()).length > 0) {
+        void loginAllEnabled().finally(() => startServices());
+      }
+      readyTimer = setTimeout(() => {
+        if (!cancelled) setReady(true);
+      }, 650);
+    };
+
+    if (useConfig.persist.hasHydrated()) {
+      finishBoot();
+    } else {
+      const unsub = useConfig.persist.onFinishHydration(finishBoot);
+      return () => {
+        cancelled = true;
+        unsub();
+        if (readyTimer) clearTimeout(readyTimer);
+      };
     }
-    const t = setTimeout(() => setReady(true), 650);
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
+    return () => {
+      cancelled = true;
+      if (readyTimer) clearTimeout(readyTimer);
+    };
+  }, [loginAllEnabled, startServices]);
 
   return (
     <GestureHandlerRootView style={{ flex: 1, backgroundColor: '#0b0b0e' }}>
@@ -69,5 +87,12 @@ export default function RootLayout() {
 
 const styles = StyleSheet.create({
   hello: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#0b0b0e' },
-  helloText: { color: '#fff', fontSize: 32, fontWeight: '300', letterSpacing: 2 },
+  helloText: {
+    color: '#fff',
+    fontSize: 32,
+    fontWeight: '300',
+    letterSpacing: 2,
+    lineHeight: 42,
+    paddingHorizontal: 8,
+  },
 });
