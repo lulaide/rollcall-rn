@@ -76,7 +76,7 @@ export default function RootLayout() {
           </Stack>
         ) : (
           <View style={styles.hello}>
-            <Text style={styles.helloText}>Hello</Text>
+            <Text style={styles.helloText}>Hi</Text>
           </View>
         )}
         <StatusBar style="light" />
